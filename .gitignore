@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.DS_Store
+certs/trino-keychain-ca.pem
+~$*.xlsx
