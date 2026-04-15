@@ -17,7 +17,7 @@ Helpers for AB-test related workflows.
 
 Missing metric values are ignored on a per-metric basis.
 
-The reported `mde_abs` and `mde_percentage` use a normal approximation based on the
+The reported `mde_abs` and `mde_relative` use a normal approximation based on the
 observed group variances and sample sizes.
 
 Ratio metrics can be passed via `ratio_metrics`, for example:
@@ -55,6 +55,7 @@ Output notes:
 - ratio metric names are prefixed as `"[ratio] metric_name"`
 - `groups` is included when there are more than two experiment groups
 - `metric_control` and `metric_test` contain the metric value in the baseline and test groups
+- `delta_relative` and `mde_relative` are raw relative changes, e.g. `0.05` for 5%
 
 `bootstrap_adj_p` is computed per metric using a bootstrap max-statistic procedure:
 

@@ -35,7 +35,7 @@ def compute_test_metrics(
     - The input must contain exactly one row per user.
     - All columns except `group` and `user_id` are treated as metric columns.
     - Missing metric values are ignored independently for each metric/group pair.
-    - `mde_abs` and `mde_percentage` use a two-sided normal approximation based
+    - `mde_abs` and `mde_relative` use a two-sided normal approximation based
       on the observed sample variances.
     - Ratio metrics can be passed through `ratio_metrics`; their output names are
       tagged with `[ratio]`.
@@ -108,9 +108,9 @@ def compute_test_metrics(
         "metric_control",
         "metric_test",
         "delta_abs",
-        "uplift",
+        "delta_relative",
         "mde_abs",
-        "mde_percentage",
+        "mde_relative",
         "p-value",
     ]
     if multiple_comparisons_adjustment:
@@ -339,20 +339,20 @@ def _build_mean_metric_row(
         "metric_control": baseline_mean,
         "metric_test": test_mean,
         "delta_abs": delta_abs,
-        "uplift": _safe_percentage(delta_abs, baseline_mean),
+        "delta_relative": _safe_relative(delta_abs, baseline_mean),
         "mde_abs": _compute_mde_abs(
             baseline_values,
             test_values,
             alpha=mde_alpha,
             power=mde_power,
         ),
-        "mde_percentage": math.nan,
+        "mde_relative": math.nan,
         "p-value": p_value,
         "bootstrap_adj_p": math.nan,
         "_metric_key": metric_key,
         "_test_stat": t_stat,
     }
-    row["mde_percentage"] = _safe_percentage(row["mde_abs"], baseline_mean)
+    row["mde_relative"] = _safe_relative(row["mde_abs"], baseline_mean)
     return row
 
 
@@ -423,9 +423,9 @@ def _build_ratio_metric_row(
         "metric_control": baseline_stats["ratio"],
         "metric_test": test_stats["ratio"],
         "delta_abs": delta_abs,
-        "uplift": _safe_percentage(delta_abs, baseline_stats["ratio"]),
+        "delta_relative": _safe_relative(delta_abs, baseline_stats["ratio"]),
         "mde_abs": mde_abs,
-        "mde_percentage": _safe_percentage(mde_abs, baseline_stats["ratio"]),
+        "mde_relative": _safe_relative(mde_abs, baseline_stats["ratio"]),
         "p-value": p_value,
         "bootstrap_adj_p": math.nan,
         "_metric_key": metric_key,
@@ -918,10 +918,10 @@ def _build_ratio_valid_mask(
     return nonmissing_mask
 
 
-def _safe_percentage(numerator: float, denominator: float) -> float:
+def _safe_relative(numerator: float, denominator: float) -> float:
     if math.isnan(numerator) or math.isnan(denominator) or denominator == 0:
         return math.nan
-    return (numerator / denominator) * 100
+    return numerator / denominator
 
 
 def _both_present(left: float, right: float) -> bool:

@@ -227,6 +227,25 @@ def test_compute_test_metrics_adds_metric_control_and_metric_test_columns() -> N
     assert orders_row["metric_test"] == pytest.approx((13 + 15 + 11 + 14) / 4)
 
 
+def test_compute_test_metrics_uses_raw_relative_fields() -> None:
+    df = _build_sample_metrics_df()
+
+    result = compute_test_metrics(df, test_vs_test=False)
+
+    assert "delta_relative" in result.columns
+    assert "mde_relative" in result.columns
+    assert "uplift" not in result.columns
+    assert "mde_percentage" not in result.columns
+
+    orders_row = result[
+        (result["groups"] == "test_a vs control") & (result["metric_name"] == "orders")
+    ].iloc[0]
+    expected_control = (10 + 12 + 9) / 3
+    expected_test = (13 + 15 + 11 + 14) / 4
+    expected_delta_abs = expected_test - expected_control
+    assert orders_row["delta_relative"] == pytest.approx(expected_delta_abs / expected_control)
+
+
 def test_ratio_metrics_default_to_agg_level() -> None:
     df = _build_sample_metrics_df()
 
