@@ -1,4 +1,4 @@
-# magnit_utils.ab_utils
+# analytics_toolkit.ab_utils
 
 Helpers for AB-test related workflows.
 

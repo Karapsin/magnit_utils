@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "magnit_utils"
-version = "0.1.1"
-description = "Shared Magnit Python utilities for SQL, Excel, and date helpers."
+name = "analytics_toolkit"
+version = "0.1.2"
+description = "Shared Python utilities for SQL, Excel, and date helpers."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -40,4 +40,4 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["magnit_utils*"]
+include = ["analytics_toolkit*"]

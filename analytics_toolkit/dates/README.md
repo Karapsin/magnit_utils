@@ -1,4 +1,4 @@
-# magnit_utils.dates
+# analytics_toolkit.dates
 
 Date helpers for common reporting workflows.
 
@@ -14,7 +14,7 @@ Date helpers for common reporting workflows.
 ## Example
 
 ```python
-from magnit_utils.dates.dates import first_day, gen_dates_list
+from analytics_toolkit.dates.dates import first_day, gen_dates_list
 
 first_day("2026-04-10")
 gen_dates_list("2026-04-01", "2026-04-10")

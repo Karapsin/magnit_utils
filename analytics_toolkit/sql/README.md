@@ -1,4 +1,4 @@
-# magnit_utils.sql
+# analytics_toolkit.sql
 
 SQL utilities for reading, executing, loading, and transferring data across:
 
@@ -9,7 +9,7 @@ SQL utilities for reading, executing, loading, and transferring data across:
 ## Public API
 
 ```python
-from magnit_utils import sql
+from analytics_toolkit import sql
 
 sql.read(...)
 sql.execute(...)

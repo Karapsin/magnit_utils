@@ -1,6 +1,6 @@
-# magnit_utils
+# analytics_toolkit
 
-`magnit_utils` is a small utility package for:
+`analytics_toolkit` is a small utility package for:
 
 - AB-test related helpers
 - SQL I/O and table-loading helpers for Trino, Greenplum, and ClickHouse
@@ -12,16 +12,16 @@
 From the repository root:
 
 ```bash
-pip install git+https://github.com/Karapsin/magnit_utils.git
+pip install git+https://github.com/Karapsin/analytics_toolkit.git
 ```
 
 ## Quick Start
 
 ```python
-from magnit_utils.ab_utils import compute_test_metrics
-from magnit_utils import sql
-from magnit_utils.dates.dates import first_day
-from magnit_utils.excel import break_into_tables
+from analytics_toolkit.ab_utils import compute_test_metrics
+from analytics_toolkit import sql
+from analytics_toolkit.dates.dates import first_day
+from analytics_toolkit.excel import break_table, pivot_and_break_table
 ```
 
 ## Configuration
@@ -40,7 +40,7 @@ directory with `MAGNIT_UTILS_HOME`.
 
 ## Package Layout
 
-- `magnit_utils/ab_utils`: AB-test metric comparison helpers, including `compute_test_metrics`
-- `magnit_utils/dates`: date and period helpers
-- `magnit_utils/excel`: Excel formatting helpers
-- `magnit_utils/sql`: SQL execution, loading, and transfer helpers
+- `analytics_toolkit/ab_utils`: AB-test metric comparison helpers, including `compute_test_metrics`
+- `analytics_toolkit/dates`: date and period helpers
+- `analytics_toolkit/excel`: Excel formatting helpers
+- `analytics_toolkit/sql`: SQL execution, loading, and transfer helpers

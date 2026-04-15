@@ -199,7 +199,7 @@ def _normalize_ratio_metrics(
 
         level = str(raw_spec.get("level", "user")).strip().lower()
         invalid_denominator = str(
-            raw_spec.get("invalid_denominator", raw_spec.get("invalid_denomitor", "ignore"))
+            raw_spec.get("invalid_denominator", raw_spec.get("invalid_denominator", "ignore"))
         ).strip().lower()
 
         if level not in {"agg", "user"}:
