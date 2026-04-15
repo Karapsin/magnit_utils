@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from scipy.stats import norm, ttest_ind
+from tqdm import tqdm
 
 DEFAULT_ALPHA = 0.05
 DEFAULT_POWER = 0.80
@@ -26,6 +27,7 @@ def compute_test_metrics(
     multiple_comparisons_adjustment_resamples: int = 2000,
     bootstrap_random_state: int | None = 0,
     bootstrap_n_jobs: int = 1,
+    bootstrap_progress: bool = False,
 ) -> pd.DataFrame:
     """Compute per-metric experiment comparison statistics.
 
@@ -46,6 +48,7 @@ def compute_test_metrics(
         multiple_comparisons_adjustment_resamples=multiple_comparisons_adjustment_resamples,
         bootstrap_random_state=bootstrap_random_state,
         bootstrap_n_jobs=bootstrap_n_jobs,
+        bootstrap_progress=bootstrap_progress,
     )
 
     if df[user_id].isna().any():
@@ -95,6 +98,7 @@ def compute_test_metrics(
             resamples=multiple_comparisons_adjustment_resamples,
             random_state=bootstrap_random_state,
             n_jobs=bootstrap_n_jobs,
+            show_progress=bootstrap_progress,
         )
 
     columns = [
@@ -138,6 +142,7 @@ def _validate_multiple_comparisons_parameters(
     multiple_comparisons_adjustment_resamples: int,
     bootstrap_random_state: int | None,
     bootstrap_n_jobs: int,
+    bootstrap_progress: bool,
 ) -> None:
     if bootstrap_random_state is not None:
         if isinstance(bootstrap_random_state, bool) or not isinstance(bootstrap_random_state, int):
@@ -146,6 +151,8 @@ def _validate_multiple_comparisons_parameters(
         raise TypeError("bootstrap_n_jobs must be an integer.")
     if bootstrap_n_jobs <= 0:
         raise ValueError("bootstrap_n_jobs must be positive.")
+    if not isinstance(bootstrap_progress, bool):
+        raise TypeError("bootstrap_progress must be a boolean.")
     if not multiple_comparisons_adjustment:
         return
     if isinstance(multiple_comparisons_adjustment_resamples, bool) or not isinstance(
@@ -531,6 +538,7 @@ def _apply_multiple_comparisons_adjustment(
     resamples: int,
     random_state: int | None,
     n_jobs: int,
+    show_progress: bool,
 ) -> None:
     if not rows:
         return
@@ -546,6 +554,7 @@ def _apply_multiple_comparisons_adjustment(
         resamples=resamples,
         random_state=random_state,
         n_jobs=n_jobs,
+        show_progress=show_progress,
     )
 
     for row in rows:
@@ -635,6 +644,7 @@ def _compute_bootstrap_family_max_statistics(
     resamples: int,
     random_state: int | None,
     n_jobs: int,
+    show_progress: bool,
 ) -> dict[str, list[float]]:
     metric_keys = [
         str(metric_context["metric_key"])
@@ -652,6 +662,7 @@ def _compute_bootstrap_family_max_statistics(
             bootstrap_context=bootstrap_context,
             resamples=batch_sizes[0],
             rng_or_seed=rng,
+            progress_position=0 if show_progress else None,
         )
         for metric_key, values in batch_result.items():
             family_max_statistics[metric_key].extend(values)
@@ -666,6 +677,7 @@ def _compute_bootstrap_family_max_statistics(
             batch_sizes=batch_sizes,
             child_sequences=child_sequences,
             n_jobs=n_jobs,
+            show_progress=show_progress,
         )
     except (NotImplementedError, PermissionError, OSError):
         batch_results = _compute_bootstrap_family_max_statistics_in_executor(
@@ -674,6 +686,7 @@ def _compute_bootstrap_family_max_statistics(
             batch_sizes=batch_sizes,
             child_sequences=child_sequences,
             n_jobs=n_jobs,
+            show_progress=show_progress,
         )
 
     for batch_result in batch_results:
@@ -689,6 +702,7 @@ def _compute_bootstrap_family_max_statistics_in_executor(
     batch_sizes: list[int],
     child_sequences: list[np.random.SeedSequence],
     n_jobs: int,
+    show_progress: bool,
 ) -> list[dict[str, list[float]]]:
     with executor_cls(max_workers=n_jobs) as executor:
         futures = [
@@ -697,8 +711,11 @@ def _compute_bootstrap_family_max_statistics_in_executor(
                 bootstrap_context,
                 batch_size,
                 child_sequence,
+                index if show_progress else None,
             )
-            for batch_size, child_sequence in zip(batch_sizes, child_sequences, strict=True)
+            for index, (batch_size, child_sequence) in enumerate(
+                zip(batch_sizes, child_sequences, strict=True)
+            )
         ]
         return [future.result() for future in futures]
 
@@ -717,6 +734,7 @@ def _compute_bootstrap_family_max_statistics_batch(
     bootstrap_context: dict[str, object],
     resamples: int,
     rng_or_seed: np.random.Generator | np.random.SeedSequence,
+    progress_position: int | None = None,
 ) -> dict[str, list[float]]:
     rng = (
         rng_or_seed
@@ -732,7 +750,17 @@ def _compute_bootstrap_family_max_statistics_batch(
     }
     sample_size = group_codes.shape[0]
 
-    for _ in range(resamples):
+    iterator = range(resamples)
+    if progress_position is not None:
+        iterator = tqdm(
+            iterator,
+            total=resamples,
+            desc="bootstrap",
+            position=progress_position,
+            leave=(progress_position == 0),
+        )
+
+    for _ in iterator:
         sample_indices = rng.integers(0, sample_size, size=sample_size)
         sampled_group_codes = group_codes[sample_indices]
         iteration_max_stats = _compute_metric_family_max_statistics_from_indices(

@@ -226,12 +226,27 @@ def test_compute_test_metrics_parallel_bootstrap_is_reproducible() -> None:
     pd.testing.assert_frame_equal(first, second)
 
 
+def test_compute_test_metrics_accepts_bootstrap_progress() -> None:
+    df = _build_sample_metrics_df()
+
+    result = compute_test_metrics(
+        df,
+        multiple_comparisons_adjustment=True,
+        multiple_comparisons_adjustment_resamples=5,
+        bootstrap_random_state=0,
+        bootstrap_progress=True,
+    )
+
+    assert "bootstrap_adj_p" in result.columns
+
+
 @pytest.mark.parametrize(
     ("kwargs", "error_type", "message"),
     [
         ({"bootstrap_random_state": True}, TypeError, "bootstrap_random_state must be an integer or None"),
         ({"bootstrap_n_jobs": 0}, ValueError, "bootstrap_n_jobs must be positive"),
         ({"bootstrap_n_jobs": True}, TypeError, "bootstrap_n_jobs must be an integer"),
+        ({"bootstrap_progress": 1}, TypeError, "bootstrap_progress must be a boolean"),
     ],
 )
 def test_compute_test_metrics_validates_bootstrap_parameters(
