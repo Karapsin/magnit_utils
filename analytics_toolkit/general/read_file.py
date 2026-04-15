@@ -19,8 +19,7 @@ def here(filename: str) -> str:
             continue
 
         candidate = frame_path.resolve().parent / normalized_name
-        if candidate.exists():
-            return str(candidate)
+        return str(candidate)
 
     cwd_candidate = Path.cwd() / normalized_name
     if cwd_candidate.exists():

@@ -22,6 +22,10 @@ pivoted_tables = pivot_and_break_table(
     sheet_by="start_dt",
 )
 
+By default both helpers replace an existing `output` workbook. Pass
+`append=True` to keep the existing file and add new sheets using the current
+sheet-deduplication behavior.
+
 wide_tables = pivot_and_break_table(
     df=wide_dataframe,
     rows="metric",

@@ -20,6 +20,7 @@ def pivot_and_break_table(
     columns: str | None = None,
     break_by: str | None = None,
     sheet_by: str | None = None,
+    append: bool = False,
 ) -> dict[object | None, list[pd.DataFrame]]:
     """Pivot a long-format dataframe into Excel tables split by tables and sheets.
 
@@ -59,6 +60,7 @@ def pivot_and_break_table(
         output=Path(output),
         break_by=break_by,
         sheet_by=sheet_by,
+        append=append,
     )
     return {
         sheet_value: [table for _, table in tables]
@@ -71,6 +73,7 @@ def break_table(
     output: str | Path,
     break_by: str | None = None,
     sheet_by: str | None = None,
+    append: bool = False,
 ) -> dict[object | None, list[pd.DataFrame]]:
     """Write grouped dataframe slices as stacked tables across Excel sheets."""
     _validate_break_input(df=df, break_by=break_by, sheet_by=sheet_by)
@@ -86,6 +89,7 @@ def break_table(
         output=Path(output),
         break_by=break_by,
         sheet_by=sheet_by,
+        append=append,
     )
     return {
         sheet_value: [table for _, table in tables]
@@ -320,9 +324,13 @@ def _write_tables(
     output: Path,
     break_by: str | None,
     sheet_by: str | None,
+    append: bool,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     existing_sheet_names: set[str] = set()
+
+    if output.exists() and not append:
+        output.unlink()
 
     if output.exists():
         workbook = load_workbook(output, read_only=True)

@@ -210,3 +210,98 @@ def test_break_table_writes_grouped_raw_tables_without_uniqueness_checks(tmp_pat
         ]
     finally:
         workbook.close()
+
+
+def test_pivot_and_break_table_replaces_existing_workbook_by_default(tmp_path: Path) -> None:
+    output = tmp_path / "replace.xlsx"
+
+    first_df = pd.DataFrame(
+        {
+            "metric": ["users", "users"],
+            "ab_group": ["control", "test_1"],
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "value": [100, 110],
+        }
+    )
+    second_df = pd.DataFrame(
+        {
+            "metric": ["arpu", "arpu"],
+            "ab_group": ["control", "test_1"],
+            "start_dt": ["2026-04-01", "2026-04-01"],
+            "value": [2.5, 2.7],
+        }
+    )
+
+    pivot_and_break_table(
+        df=first_df,
+        rows="metric",
+        value="value",
+        output=output,
+        columns="ab_group",
+        sheet_by="start_dt",
+    )
+    pivot_and_break_table(
+        df=second_df,
+        rows="metric",
+        value="value",
+        output=output,
+        columns="ab_group",
+        sheet_by="start_dt",
+    )
+
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    try:
+        assert workbook.sheetnames == ["2026-04-01"]
+        rows = list(workbook["2026-04-01"].iter_rows(values_only=True))
+        assert rows[:3] == [
+            ("metric", "control", "test_1"),
+            ("arpu", 2.5, 2.7),
+            (None, None, None),
+        ]
+    finally:
+        workbook.close()
+
+
+def test_pivot_and_break_table_appends_new_sheets_when_requested(tmp_path: Path) -> None:
+    output = tmp_path / "append.xlsx"
+
+    first_df = pd.DataFrame(
+        {
+            "metric": ["users", "users"],
+            "ab_group": ["control", "test_1"],
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "value": [100, 110],
+        }
+    )
+    second_df = pd.DataFrame(
+        {
+            "metric": ["arpu", "arpu"],
+            "ab_group": ["control", "test_1"],
+            "start_dt": ["2026-04-01", "2026-04-01"],
+            "value": [2.5, 2.7],
+        }
+    )
+
+    pivot_and_break_table(
+        df=first_df,
+        rows="metric",
+        value="value",
+        output=output,
+        columns="ab_group",
+        sheet_by="start_dt",
+    )
+    pivot_and_break_table(
+        df=second_df,
+        rows="metric",
+        value="value",
+        output=output,
+        columns="ab_group",
+        sheet_by="start_dt",
+        append=True,
+    )
+
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    try:
+        assert workbook.sheetnames == ["2026-03-30", "2026-04-01"]
+    finally:
+        workbook.close()
