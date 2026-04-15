@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ....connection.get_sql_connection import get_sql_connection
-from ....general.logging import time_print
+from analytics_toolkit.general import time_print
 from ...load.load_sql_table import insert_table_batch
 from .finalize import cleanup_stage, finalize_loaded_stage
 from ..runtime.models import TransferConnectionRefs, TransferOptions, TransferStageState

@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 
 from ..connection.errors import UnsupportedConnectionTypeError
-from ..general.logging import time_print
+from analytics_toolkit.general import time_print
 
 
 def create_sql_table(

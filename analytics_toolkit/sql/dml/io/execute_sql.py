@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
 from ...connection.get_sql_connection import with_sql_connection
-from ...general.logging import time_print
+from analytics_toolkit.general import time_print
 
 
 @with_sql_connection("trino")

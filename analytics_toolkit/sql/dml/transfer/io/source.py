@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 
 from ....connection.errors import UnsupportedConnectionTypeError
-from ....general.logging import time_print
+from analytics_toolkit.general import time_print
 from ..runtime.retry import replace_connection, rollback_quietly, run_with_retry
 
 

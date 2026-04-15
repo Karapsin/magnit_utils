@@ -7,7 +7,7 @@ import pandas as pd
 from sqlglot import exp, parse_one
 
 from ...connection.errors import UnsupportedConnectionTypeError
-from ...general.logging import time_print
+from analytics_toolkit.general import time_print
 from ...ddl.create_sql_table import create_sql_table
 from ..table.table_ops import table_exists
 

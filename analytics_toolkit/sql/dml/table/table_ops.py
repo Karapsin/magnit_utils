@@ -7,7 +7,7 @@ import pandas as pd
 from ...connection.config import TrinoConfig, get_connection_config
 from ...ddl.create_sql_table import create_sql_table
 from ...connection.errors import UnsupportedConnectionTypeError
-from ...general.logging import time_print
+from analytics_toolkit.general import time_print
 
 
 def table_exists(connection_type: str, connection: Any, table_name: str) -> bool:

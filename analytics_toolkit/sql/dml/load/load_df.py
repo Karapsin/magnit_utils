@@ -7,7 +7,7 @@ import pandas as pd
 from ...ddl.create_sql_table import create_sql_table
 from ...connection.errors import UnsupportedConnectionTypeError
 from ...connection.get_sql_connection import get_sql_connection
-from ...general.logging import time_print
+from analytics_toolkit.general import time_print
 from .load_sql_table import insert_table_batch
 from .models import LoadOptions, LoadState
 from .stage import create_stage_table

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from .config import ChConfig, GpConfig, TrinoConfig, get_connection_config
 from .errors import SqlConfigError, UnsupportedConnectionTypeError
-from ..general.logging import time_print
+from analytics_toolkit.general import time_print
 
 
 def get_sql_connection(connection_type: str) -> Any:

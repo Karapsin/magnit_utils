@@ -8,7 +8,7 @@ from psycopg2.extras import execute_values
 
 from ...ddl.create_sql_table import column_list_sql
 from ...connection.errors import UnsupportedConnectionTypeError
-from ...general.logging import time_print
+from analytics_toolkit.general import time_print
 
 
 class AmbiguousTableLoadError(Exception):

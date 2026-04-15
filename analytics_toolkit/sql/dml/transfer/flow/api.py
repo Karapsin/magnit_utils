@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ....connection.errors import UnsupportedConnectionTypeError
-from ....general.logging import time_print
+from analytics_toolkit.general import time_print
 from ...load.load_sql_table import AmbiguousTableLoadError
 from ...table.table_validation import normalize_key_columns
 from .attempt import run_transfer_attempt

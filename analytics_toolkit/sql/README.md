@@ -60,7 +60,6 @@ and only relevant in environments that rely on local keychain-managed certificat
 ## Internal Layout
 
 - `connection/`: connection config and backend connection creation
-- `general/`: shared helpers such as logging and SQL parsing
 - `ddl/`: table-creation helpers
 - `dml/io/`: read and execute operations
 - `dml/load/`: dataframe loading and staging helpers

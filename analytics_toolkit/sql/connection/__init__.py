@@ -6,7 +6,7 @@ from .errors import (
     UnsupportedConnectionTypeError,
 )
 from .get_sql_connection import get_sql_connection, with_sql_connection
-from ..general.logging import time_print
+from analytics_toolkit.general import time_print
 
 __all__ = [
     "ChConfig",

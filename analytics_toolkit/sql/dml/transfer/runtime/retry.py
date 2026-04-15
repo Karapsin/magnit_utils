@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ....connection.get_sql_connection import get_sql_connection
-from ....general.logging import time_print
+from analytics_toolkit.general import time_print
 
 
 def run_with_retry(

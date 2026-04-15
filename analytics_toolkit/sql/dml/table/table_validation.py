@@ -5,7 +5,7 @@ from typing import Any
 
 from ...ddl.create_sql_table import column_list_sql, quote_identifier
 from ...connection.errors import UnsupportedConnectionTypeError
-from ...general.logging import time_print
+from analytics_toolkit.general import time_print
 
 
 def normalize_key_columns(key_columns: list[str] | None) -> list[str] | None:
