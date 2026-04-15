@@ -82,7 +82,11 @@ def break_table(
         df=df,
         break_by=break_by,
         sheet_by=sheet_by,
-        table_builder=lambda part: part.reset_index(drop=True),
+        table_builder=lambda part: _build_raw_table(
+            part,
+            break_by=break_by,
+            sheet_by=sheet_by,
+        ),
     )
     _write_tables(
         sheet_tables=sheet_tables,
@@ -95,6 +99,15 @@ def break_table(
         sheet_value: [table for _, table in tables]
         for sheet_value, tables in sheet_tables.items()
     }
+
+
+def _build_raw_table(
+    df: pd.DataFrame,
+    break_by: str | None,
+    sheet_by: str | None,
+) -> pd.DataFrame:
+    drop_columns = [column for column in (break_by, sheet_by) if column is not None]
+    return df.drop(columns=drop_columns, errors="ignore").reset_index(drop=True)
 
 
 def _validate_pivot_input(
@@ -358,7 +371,7 @@ def _write_tables(
             startrow = 0
             for break_value, table in tables:
                 if break_by is not None:
-                    title = pd.DataFrame({break_by: [f"{break_by} = {break_value}"]})
+                    title = pd.DataFrame({break_by: [break_value]})
                     title.to_excel(
                         writer,
                         sheet_name=sheet_name,

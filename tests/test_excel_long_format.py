@@ -41,7 +41,7 @@ def test_pivot_and_break_table_writes_multiple_sheets_and_tables(tmp_path: Path)
         first_sheet = workbook["2026-03-30"]
         rows = list(first_sheet.iter_rows(values_only=True))
         assert rows[:4] == [
-            ("qr_group = ALL", None, None),
+            ("ALL", None, None),
             ("metric", "control", "test_1"),
             ("users", 100, 110),
             ("arpu", 2.5, 2.7),
@@ -138,7 +138,7 @@ def test_pivot_and_break_table_accepts_multiple_value_columns(tmp_path: Path) ->
     try:
         rows = list(workbook["2026-03-30"].iter_rows(values_only=True))
         assert rows[:4] == [
-            ("qr_group = ALL", None, None),
+            ("ALL", None, None),
             ("metric", "control", "test_1"),
             ("users", 100, 110),
             ("arpu", 2.5, 2.7),
@@ -194,19 +194,24 @@ def test_break_table_writes_grouped_raw_tables_without_uniqueness_checks(tmp_pat
     )
 
     assert list(tables) == ["2026-03-30"]
-    assert tables["2026-03-30"][0].to_dict(orient="records") == df.to_dict(orient="records")
+    assert tables["2026-03-30"][0].to_dict(orient="records") == [
+        {"metric": "users", "ab_group": "control", "value": 100},
+        {"metric": "users", "ab_group": "control", "value": 120},
+        {"metric": "users", "ab_group": "test_1", "value": 110},
+        {"metric": "users", "ab_group": "test_1", "value": 130},
+    ]
 
     workbook = load_workbook(output, read_only=True, data_only=True)
     try:
         assert workbook.sheetnames == ["2026-03-30"]
         rows = list(workbook["2026-03-30"].iter_rows(values_only=True))
         assert rows[:6] == [
-            ("qr_group = ALL", None, None, None, None),
-            ("metric", "ab_group", "qr_group", "start_dt", "value"),
-            ("users", "control", "ALL", "2026-03-30", 100),
-            ("users", "control", "ALL", "2026-03-30", 120),
-            ("users", "test_1", "ALL", "2026-03-30", 110),
-            ("users", "test_1", "ALL", "2026-03-30", 130),
+            ("ALL", None, None),
+            ("metric", "ab_group", "value"),
+            ("users", "control", 100),
+            ("users", "control", 120),
+            ("users", "test_1", 110),
+            ("users", "test_1", 130),
         ]
     finally:
         workbook.close()
@@ -253,10 +258,9 @@ def test_pivot_and_break_table_replaces_existing_workbook_by_default(tmp_path: P
     try:
         assert workbook.sheetnames == ["2026-04-01"]
         rows = list(workbook["2026-04-01"].iter_rows(values_only=True))
-        assert rows[:3] == [
+        assert rows[:2] == [
             ("metric", "control", "test_1"),
             ("arpu", 2.5, 2.7),
-            (None, None, None),
         ]
     finally:
         workbook.close()
