@@ -21,6 +21,7 @@ def pivot_and_break_table(
     break_by: str | None = None,
     sheet_by: str | None = None,
     append: bool = False,
+    enforce_same_row_order: bool = False,
 ) -> dict[object | None, list[pd.DataFrame]] | dict[object | None, list[list[pd.DataFrame]]]:
     """Pivot a long-format dataframe into Excel tables split by tables and sheets.
 
@@ -59,6 +60,11 @@ def pivot_and_break_table(
                     columns=columns,
                 ),
             )
+        )
+    if enforce_same_row_order and len(sheet_table_groups) > 1:
+        _enforce_same_row_order_across_groups(
+            sheet_table_groups=sheet_table_groups,
+            rows=rows,
         )
     _write_tables(
         sheet_table_groups=sheet_table_groups,
@@ -369,6 +375,73 @@ def _build_pivot_table(
 
     table = pivot_df.pivot(index=rows, columns=columns, values=value)
     return table.reset_index().rename_axis(columns=None)
+
+
+def _enforce_same_row_order_across_groups(
+    sheet_table_groups: list[dict[object | None, list[tuple[object | None, pd.DataFrame]]]],
+    rows: str,
+) -> None:
+    reference_group = sheet_table_groups[0]
+    sheet_values = _collect_sheet_values(sheet_table_groups)
+    for sheet_value in sheet_values:
+        reference_tables = reference_group.get(sheet_value, [])
+        for group_index, sheet_tables in enumerate(sheet_table_groups[1:], start=2):
+            current_tables = sheet_tables.get(sheet_value, [])
+            if len(current_tables) > len(reference_tables):
+                raise ValueError(
+                    f"Dataframe #{group_index} produced more tables than dataframe #1 for sheet {sheet_value!r}."
+                )
+
+            aligned_tables: list[tuple[object | None, pd.DataFrame]] = []
+            for table_index, (break_value, table) in enumerate(current_tables):
+                reference_break_value, reference_table = reference_tables[table_index]
+                if not _sheet_value_equals(break_value, reference_break_value):
+                    raise ValueError(
+                        "Cannot enforce the same row order when grouped tables do not align by "
+                        f"position for sheet {sheet_value!r}: dataframe #1 has break value "
+                        f"{reference_break_value!r} and dataframe #{group_index} has {break_value!r} "
+                        f"at table position {table_index + 1}."
+                    )
+                aligned_tables.append(
+                    (
+                        break_value,
+                        _align_table_to_reference_rows(
+                            table=table,
+                            reference_table=reference_table,
+                            rows=rows,
+                            sheet_value=sheet_value,
+                            break_value=break_value,
+                            dataframe_index=group_index,
+                            table_index=table_index,
+                        ),
+                    )
+                )
+            sheet_tables[sheet_value] = aligned_tables
+
+
+def _align_table_to_reference_rows(
+    table: pd.DataFrame,
+    reference_table: pd.DataFrame,
+    rows: str,
+    sheet_value: object | None,
+    break_value: object | None,
+    dataframe_index: int,
+    table_index: int,
+) -> pd.DataFrame:
+    reference_labels = list(reference_table[rows])
+    row_labels = list(table[rows])
+    extra_labels = [
+        label for label in row_labels if not any(_sheet_value_equals(label, ref) for ref in reference_labels)
+    ]
+    if extra_labels:
+        raise ValueError(
+            f"Dataframe #{dataframe_index} contains extra row labels for sheet {sheet_value!r}, "
+            f"break {break_value!r}, table position {table_index + 1}: {extra_labels}."
+        )
+
+    aligned_table = table.set_index(rows).reindex(reference_labels).reset_index()
+    aligned_table.columns = table.columns
+    return aligned_table
 
 
 def _write_tables(

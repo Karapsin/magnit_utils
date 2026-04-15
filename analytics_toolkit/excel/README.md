@@ -28,6 +28,11 @@ By default both helpers replace an existing `output` workbook. Pass
 `append=True` to keep the existing file and add new sheets using the current
 sheet-deduplication behavior.
 
+When writing multiple dataframes with `pivot_and_break_table`, pass
+`enforce_same_row_order=True` to align each later dataframe's pivoted row-label
+order to the first dataframe. Missing row labels are written as blank rows; extra
+row labels in later dataframes raise a `ValueError`.
+
 wide_tables = pivot_and_break_table(
     df=wide_dataframe,
     rows="metric",

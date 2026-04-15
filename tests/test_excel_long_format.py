@@ -224,6 +224,126 @@ def test_pivot_and_break_table_accepts_multiple_dataframes_side_by_side(tmp_path
         workbook.close()
 
 
+def test_pivot_and_break_table_enforces_same_row_order_with_padding(tmp_path: Path) -> None:
+    first_df = pd.DataFrame(
+        {
+            "metric": ["users", "users", "arpu", "arpu"],
+            "ab_group": ["control", "test_1", "control", "test_1"],
+            "start_dt": ["2026-03-30"] * 4,
+            "value": [100, 110, 2.5, 2.7],
+        }
+    )
+    second_df = pd.DataFrame(
+        {
+            "metric": ["arpu", "arpu"],
+            "ab_group": ["control", "test_1"],
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "value": [3.1, 3.3],
+        }
+    )
+
+    output = tmp_path / "enforced_row_order_padding.xlsx"
+    tables = pivot_and_break_table(
+        df=[first_df, second_df],
+        rows="metric",
+        value="value",
+        output=output,
+        columns="ab_group",
+        sheet_by="start_dt",
+        enforce_same_row_order=True,
+    )
+
+    assert tables["2026-03-30"][0][0].to_dict(orient="records") == [
+        {"metric": "users", "control": 100.0, "test_1": 110.0},
+        {"metric": "arpu", "control": 2.5, "test_1": 2.7},
+    ]
+    second_table = tables["2026-03-30"][1][0]
+    assert second_table["metric"].tolist() == ["users", "arpu"]
+    assert pd.isna(second_table.iloc[0]["control"])
+    assert pd.isna(second_table.iloc[0]["test_1"])
+    assert second_table.iloc[1]["control"] == 3.1
+    assert second_table.iloc[1]["test_1"] == 3.3
+
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    try:
+        rows = list(workbook["2026-03-30"].iter_rows(values_only=True))
+        assert rows[:4] == [
+            ("metric", "control", "test_1", None, "metric", "control", "test_1"),
+            ("users", 100, 110, None, "users", None, None),
+            ("arpu", 2.5, 2.7, None, "arpu", 3.1, 3.3),
+            (None, None, None, None, None, None, None),
+        ]
+    finally:
+        workbook.close()
+
+
+def test_pivot_and_break_table_enforces_same_row_order_by_reordering(tmp_path: Path) -> None:
+    first_df = pd.DataFrame(
+        {
+            "metric": ["users", "users", "arpu", "arpu"],
+            "ab_group": ["control", "test_1", "control", "test_1"],
+            "start_dt": ["2026-03-30"] * 4,
+            "value": [100, 110, 2.5, 2.7],
+        }
+    )
+    second_df = pd.DataFrame(
+        {
+            "metric": ["arpu", "arpu", "users", "users"],
+            "ab_group": ["control", "test_1", "control", "test_1"],
+            "start_dt": ["2026-03-30"] * 4,
+            "value": [3.1, 3.3, 200, 220],
+        }
+    )
+
+    output = tmp_path / "enforced_row_order_reordered.xlsx"
+    tables = pivot_and_break_table(
+        df=[first_df, second_df],
+        rows="metric",
+        value="value",
+        output=output,
+        columns="ab_group",
+        sheet_by="start_dt",
+        enforce_same_row_order=True,
+    )
+
+    assert tables["2026-03-30"][1][0].to_dict(orient="records") == [
+        {"metric": "users", "control": 200.0, "test_1": 220.0},
+        {"metric": "arpu", "control": 3.1, "test_1": 3.3},
+    ]
+
+
+def test_pivot_and_break_table_rejects_extra_rows_when_enforcing_same_row_order(
+    tmp_path: Path,
+) -> None:
+    first_df = pd.DataFrame(
+        {
+            "metric": ["users", "users"],
+            "ab_group": ["control", "test_1"],
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "value": [100, 110],
+        }
+    )
+    second_df = pd.DataFrame(
+        {
+            "metric": ["users", "users", "arpu", "arpu"],
+            "ab_group": ["control", "test_1", "control", "test_1"],
+            "start_dt": ["2026-03-30"] * 4,
+            "value": [200, 220, 3.1, 3.3],
+        }
+    )
+
+    with pytest.raises(ValueError, match="extra row labels"):
+        pivot_and_break_table(
+            df=[first_df, second_df],
+            rows="metric",
+            value="value",
+            output=tmp_path / "enforced_row_order_error.xlsx",
+            columns="ab_group",
+            sheet_by="start_dt",
+            enforce_same_row_order=True,
+        )
+
+
 def test_break_table_writes_grouped_raw_tables_without_uniqueness_checks(tmp_path: Path) -> None:
     df = pd.DataFrame(
         {
