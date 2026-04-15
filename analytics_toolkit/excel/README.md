@@ -7,6 +7,8 @@ Excel helpers for converting long-format data into one or more report tables.
 - `pivot_and_break_table`: pivot a dataframe and write the resulting table set to Excel
 - `break_table`: split a dataframe into sheets and stacked tables without pivoting
 
+Both helpers accept either a single dataframe or a list of dataframes.
+
 ## Example
 
 ```python
@@ -51,8 +53,21 @@ raw_tables = break_table(
     break_by="qr_group",
     sheet_by="start_dt",
 )
+
+combined_tables = pivot_and_break_table(
+    df=[dataframe_a, dataframe_b],
+    rows="metric",
+    value="value",
+    output="combined_report.xlsx",
+    columns="ab_group",
+    break_by="qr_group",
+    sheet_by="start_dt",
+)
 ```
 
 Both helpers return the written dataframes grouped by the original `sheet_by`
 values, which makes them convenient for tests or for callers that need both the
-Excel file and the transformed tables.
+Excel file and the transformed tables. When a list of dataframes is passed, each
+sheet places the first dataframe's tables in the left block, the second
+dataframe's tables in the next block to the right with one blank column between
+blocks, and so on.

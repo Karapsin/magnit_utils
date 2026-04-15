@@ -174,6 +174,56 @@ def test_pivot_and_break_table_detects_value_columns_when_omitted(tmp_path: Path
     ]
 
 
+def test_pivot_and_break_table_accepts_multiple_dataframes_side_by_side(tmp_path: Path) -> None:
+    first_df = pd.DataFrame(
+        {
+            "metric": ["users", "users"],
+            "ab_group": ["control", "test_1"],
+            "qr_group": ["ALL", "ALL"],
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "value": [100, 110],
+        }
+    )
+    second_df = pd.DataFrame(
+        {
+            "metric": ["arpu", "arpu"],
+            "ab_group": ["control", "test_1"],
+            "qr_group": ["ALL", "ALL"],
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "value": [2.5, 2.7],
+        }
+    )
+
+    output = tmp_path / "multi_df_pivot.xlsx"
+    tables = pivot_and_break_table(
+        df=[first_df, second_df],
+        rows="metric",
+        value="value",
+        output=output,
+        columns="ab_group",
+        break_by="qr_group",
+        sheet_by="start_dt",
+    )
+
+    assert tables["2026-03-30"][0][0].to_dict(orient="records") == [
+        {"metric": "users", "control": 100, "test_1": 110},
+    ]
+    assert tables["2026-03-30"][1][0].to_dict(orient="records") == [
+        {"metric": "arpu", "control": 2.5, "test_1": 2.7},
+    ]
+
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    try:
+        rows = list(workbook["2026-03-30"].iter_rows(values_only=True))
+        assert rows[:3] == [
+            ("ALL", None, None, None, "ALL", None, None),
+            ("metric", "control", "test_1", None, "metric", "control", "test_1"),
+            ("users", 100, 110, None, "arpu", 2.5, 2.7),
+        ]
+    finally:
+        workbook.close()
+
+
 def test_break_table_writes_grouped_raw_tables_without_uniqueness_checks(tmp_path: Path) -> None:
     df = pd.DataFrame(
         {
@@ -212,6 +262,56 @@ def test_break_table_writes_grouped_raw_tables_without_uniqueness_checks(tmp_pat
             ("users", "control", 120),
             ("users", "test_1", 110),
             ("users", "test_1", 130),
+        ]
+    finally:
+        workbook.close()
+
+
+def test_break_table_accepts_multiple_dataframes_side_by_side(tmp_path: Path) -> None:
+    first_df = pd.DataFrame(
+        {
+            "metric": ["users", "users"],
+            "ab_group": ["control", "test_1"],
+            "qr_group": ["ALL", "ALL"],
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "value": [100, 110],
+        }
+    )
+    second_df = pd.DataFrame(
+        {
+            "metric": ["arpu", "arpu"],
+            "ab_group": ["control", "test_1"],
+            "qr_group": ["ALL", "ALL"],
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "value": [2.5, 2.7],
+        }
+    )
+
+    output = tmp_path / "multi_df_raw.xlsx"
+    tables = break_table(
+        df=[first_df, second_df],
+        output=output,
+        break_by="qr_group",
+        sheet_by="start_dt",
+    )
+
+    assert tables["2026-03-30"][0][0].to_dict(orient="records") == [
+        {"metric": "users", "ab_group": "control", "value": 100},
+        {"metric": "users", "ab_group": "test_1", "value": 110},
+    ]
+    assert tables["2026-03-30"][1][0].to_dict(orient="records") == [
+        {"metric": "arpu", "ab_group": "control", "value": 2.5},
+        {"metric": "arpu", "ab_group": "test_1", "value": 2.7},
+    ]
+
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    try:
+        rows = list(workbook["2026-03-30"].iter_rows(values_only=True))
+        assert rows[:4] == [
+            ("ALL", None, None, None, "ALL", None, None),
+            ("metric", "ab_group", "value", None, "metric", "ab_group", "value"),
+            ("users", "control", 100, None, "arpu", "control", 2.5),
+            ("users", "test_1", 110, None, "arpu", "test_1", 2.7),
         ]
     finally:
         workbook.close()

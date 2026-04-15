@@ -13,7 +13,7 @@ _MELTED_VALUE_COLUMN = "__pivot_and_break_value__"
 
 
 def pivot_and_break_table(
-    df: pd.DataFrame,
+    df: pd.DataFrame | Sequence[pd.DataFrame],
     rows: str,
     output: str | Path,
     value: str | Sequence[str] | None = None,
@@ -21,83 +21,122 @@ def pivot_and_break_table(
     break_by: str | None = None,
     sheet_by: str | None = None,
     append: bool = False,
-) -> dict[object | None, list[pd.DataFrame]]:
+) -> dict[object | None, list[pd.DataFrame]] | dict[object | None, list[list[pd.DataFrame]]]:
     """Pivot a long-format dataframe into Excel tables split by tables and sheets.
 
     Returns the written tables grouped by the original ``sheet_by`` values. When
     ``sheet_by`` is omitted, the result contains a single ``None`` key.
     """
-    value_columns = _normalize_value_columns(
-        df=df,
-        value=value,
-        rows=rows,
-        columns=columns,
-        break_by=break_by,
-        sheet_by=sheet_by,
-    )
-    normalized_df, normalized_value = _prepare_pivot_source(
-        df=df,
-        rows=rows,
-        value_columns=value_columns,
-        columns=columns,
-        break_by=break_by,
-        sheet_by=sheet_by,
-    )
-
-    sheet_tables = _build_sheet_tables(
-        df=normalized_df,
-        break_by=break_by,
-        sheet_by=sheet_by,
-        table_builder=lambda part: _build_pivot_table(
-            df=part,
+    dataframes = _normalize_dataframe_inputs(df)
+    sheet_table_groups: list[dict[object | None, list[tuple[object | None, pd.DataFrame]]]] = []
+    for part_df in dataframes:
+        value_columns = _normalize_value_columns(
+            df=part_df,
+            value=value,
             rows=rows,
-            value=normalized_value,
             columns=columns,
-        ),
-    )
+            break_by=break_by,
+            sheet_by=sheet_by,
+        )
+        normalized_df, normalized_value = _prepare_pivot_source(
+            df=part_df,
+            rows=rows,
+            value_columns=value_columns,
+            columns=columns,
+            break_by=break_by,
+            sheet_by=sheet_by,
+        )
+
+        sheet_table_groups.append(
+            _build_sheet_tables(
+                df=normalized_df,
+                break_by=break_by,
+                sheet_by=sheet_by,
+                table_builder=lambda part, normalized_value=normalized_value: _build_pivot_table(
+                    df=part,
+                    rows=rows,
+                    value=normalized_value,
+                    columns=columns,
+                ),
+            )
+        )
     _write_tables(
-        sheet_tables=sheet_tables,
+        sheet_table_groups=sheet_table_groups,
         output=Path(output),
         break_by=break_by,
         sheet_by=sheet_by,
         append=append,
     )
-    return {
-        sheet_value: [table for _, table in tables]
-        for sheet_value, tables in sheet_tables.items()
-    }
+    return _extract_written_tables(sheet_table_groups)
 
 
 def break_table(
-    df: pd.DataFrame,
+    df: pd.DataFrame | Sequence[pd.DataFrame],
     output: str | Path,
     break_by: str | None = None,
     sheet_by: str | None = None,
     append: bool = False,
-) -> dict[object | None, list[pd.DataFrame]]:
+) -> dict[object | None, list[pd.DataFrame]] | dict[object | None, list[list[pd.DataFrame]]]:
     """Write grouped dataframe slices as stacked tables across Excel sheets."""
-    _validate_break_input(df=df, break_by=break_by, sheet_by=sheet_by)
-
-    sheet_tables = _build_sheet_tables(
-        df=df,
-        break_by=break_by,
-        sheet_by=sheet_by,
-        table_builder=lambda part: _build_raw_table(
-            part,
-            break_by=break_by,
-            sheet_by=sheet_by,
-        ),
-    )
+    dataframes = _normalize_dataframe_inputs(df)
+    sheet_table_groups: list[dict[object | None, list[tuple[object | None, pd.DataFrame]]]] = []
+    for part_df in dataframes:
+        _validate_break_input(df=part_df, break_by=break_by, sheet_by=sheet_by)
+        sheet_table_groups.append(
+            _build_sheet_tables(
+                df=part_df,
+                break_by=break_by,
+                sheet_by=sheet_by,
+                table_builder=lambda part: _build_raw_table(
+                    part,
+                    break_by=break_by,
+                    sheet_by=sheet_by,
+                ),
+            )
+        )
     _write_tables(
-        sheet_tables=sheet_tables,
+        sheet_table_groups=sheet_table_groups,
         output=Path(output),
         break_by=break_by,
         sheet_by=sheet_by,
         append=append,
     )
+    return _extract_written_tables(sheet_table_groups)
+
+
+def _normalize_dataframe_inputs(
+    df: pd.DataFrame | Sequence[pd.DataFrame],
+) -> list[pd.DataFrame]:
+    if isinstance(df, pd.DataFrame):
+        return [df]
+    if not isinstance(df, Sequence) or isinstance(df, (str, bytes)):
+        raise TypeError("'df' must be a dataframe or a sequence of dataframes.")
+
+    dataframes = list(df)
+    if not dataframes:
+        raise ValueError("'df' must contain at least one dataframe.")
+    if any(not isinstance(part, pd.DataFrame) for part in dataframes):
+        raise TypeError("'df' must be a dataframe or a sequence of dataframes.")
+    return dataframes
+
+
+def _extract_written_tables(
+    sheet_table_groups: list[dict[object | None, list[tuple[object | None, pd.DataFrame]]]],
+) -> dict[object | None, list[pd.DataFrame]] | dict[object | None, list[list[pd.DataFrame]]]:
+    sheet_values = _collect_sheet_values(sheet_table_groups)
+    if len(sheet_table_groups) == 1:
+        sheet_tables = sheet_table_groups[0]
+        return {
+            sheet_value: [table for _, table in sheet_tables.get(sheet_value, [])]
+            for sheet_value in sheet_values
+        }
+
     return {
-        sheet_value: [table for _, table in tables]
-        for sheet_value, tables in sheet_tables.items()
+        sheet_value: [
+            [table for _, table in sheet_tables.get(sheet_value, [])]
+            for sheet_tables in sheet_table_groups
+        ]
+        for sheet_value in sheet_values
     }
 
 
@@ -333,7 +372,7 @@ def _build_pivot_table(
 
 
 def _write_tables(
-    sheet_tables: dict[object | None, list[tuple[object | None, pd.DataFrame]]],
+    sheet_table_groups: list[dict[object | None, list[tuple[object | None, pd.DataFrame]]]],
     output: Path,
     break_by: str | None,
     sheet_by: str | None,
@@ -355,8 +394,9 @@ def _write_tables(
     else:
         mode = "w"
 
+    sheet_values = _collect_sheet_values(sheet_table_groups)
     sheet_name_map = _build_sheet_name_map(
-        sheet_values=list(sheet_tables.keys()),
+        sheet_values=sheet_values,
         sheet_by=sheet_by,
         existing_sheet_names=existing_sheet_names,
     )
@@ -366,23 +406,76 @@ def _write_tables(
         writer_kwargs["if_sheet_exists"] = "overlay"
 
     with pd.ExcelWriter(output, **writer_kwargs) as writer:
-        for sheet_value, tables in sheet_tables.items():
+        for sheet_value in sheet_values:
             sheet_name = sheet_name_map[sheet_value]
-            startrow = 0
-            for break_value, table in tables:
-                if break_by is not None:
-                    title = pd.DataFrame({break_by: [break_value]})
-                    title.to_excel(
-                        writer,
-                        sheet_name=sheet_name,
-                        index=False,
-                        header=False,
-                        startrow=startrow,
-                    )
-                    startrow += 1
+            startcol = 0
+            for sheet_tables in sheet_table_groups:
+                tables = sheet_tables.get(sheet_value, [])
+                if not tables:
+                    continue
 
-                table.to_excel(writer, sheet_name=sheet_name, index=False, startrow=startrow)
-                startrow += len(table.index) + 3
+                block_width = _write_table_block(
+                    writer=writer,
+                    sheet_name=sheet_name,
+                    tables=tables,
+                    break_by=break_by,
+                    startcol=startcol,
+                )
+                startcol += block_width + 1
+
+
+def _collect_sheet_values(
+    sheet_table_groups: list[dict[object | None, list[tuple[object | None, pd.DataFrame]]]],
+) -> list[object | None]:
+    sheet_values: list[object | None] = []
+    for sheet_tables in sheet_table_groups:
+        for sheet_value in sheet_tables:
+            if any(_sheet_value_equals(sheet_value, existing) for existing in sheet_values):
+                continue
+            sheet_values.append(sheet_value)
+    return sheet_values
+
+
+def _sheet_value_equals(left: object | None, right: object | None) -> bool:
+    if pd.isna(left) and pd.isna(right):
+        return True
+    return left == right
+
+
+def _write_table_block(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    tables: list[tuple[object | None, pd.DataFrame]],
+    break_by: str | None,
+    startcol: int,
+) -> int:
+    startrow = 0
+    block_width = 0
+    for break_value, table in tables:
+        table_width = len(table.columns)
+        if break_by is not None:
+            title = pd.DataFrame({break_by: [break_value]})
+            title.to_excel(
+                writer,
+                sheet_name=sheet_name,
+                index=False,
+                header=False,
+                startrow=startrow,
+                startcol=startcol,
+            )
+            startrow += 1
+            table_width = max(table_width, 1)
+
+        table.to_excel(
+            writer,
+            sheet_name=sheet_name,
+            index=False,
+            startrow=startrow,
+            startcol=startcol,
+        )
+        startrow += len(table.index) + 3
+        block_width = max(block_width, table_width)
+    return block_width
 
 
 def _build_sheet_name_map(
