@@ -52,8 +52,9 @@ Other function options:
 
 Output notes:
 
-- ratio metric names are prefixed as `"[ratio] metric_name"`
-- `groups` is included when there are more than two experiment groups
+- ratio metric names use the provided ratio metric `name` directly
+- `metric_type` is `"mean"` for regular metrics and `"ratio"` for ratio metrics
+- `group_1` and `group_2` are included when there are more than two experiment groups
 - `metric_control` and `metric_test` contain the metric value in the baseline and test groups
 - `delta_relative` and `mde_relative` are raw relative changes, e.g. `0.05` for 5%
 

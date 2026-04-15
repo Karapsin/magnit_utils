@@ -166,12 +166,13 @@ def _legacy_bootstrap_adjustment(
 
             row = {"metric_name": metric_key, "bootstrap_adj_p": adjusted_p}
             if include_groups:
-                row["groups"] = f"{test_group} vs {baseline_group}"
+                row["group_1"] = test_group
+                row["group_2"] = baseline_group
             rows.append(row)
 
     columns = ["metric_name", "bootstrap_adj_p"]
     if include_groups:
-        columns = ["groups", *columns]
+        columns = ["group_1", "group_2", *columns]
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -201,7 +202,8 @@ def test_compute_test_metrics_matches_legacy_bootstrap_adjustment_single_thread(
     )
 
     pd.testing.assert_series_equal(result["metric_name"], legacy["metric_name"])
-    pd.testing.assert_series_equal(result["groups"], legacy["groups"])
+    pd.testing.assert_series_equal(result["group_1"], legacy["group_1"])
+    pd.testing.assert_series_equal(result["group_2"], legacy["group_2"])
     np.testing.assert_allclose(result["bootstrap_adj_p"], legacy["bootstrap_adj_p"], equal_nan=True)
 
 
@@ -210,8 +212,10 @@ def test_compute_test_metrics_adds_metric_control_and_metric_test_columns() -> N
 
     result = compute_test_metrics(df, test_vs_test=False)
 
-    assert result.columns.tolist()[:7] == [
-        "groups",
+    assert result.columns.tolist()[:9] == [
+        "metric_type",
+        "group_1",
+        "group_2",
         "metric_name",
         "n0",
         "n1",
@@ -221,8 +225,11 @@ def test_compute_test_metrics_adds_metric_control_and_metric_test_columns() -> N
     ]
 
     orders_row = result[
-        (result["groups"] == "test_a vs control") & (result["metric_name"] == "orders")
+        (result["group_1"] == "test_a")
+        & (result["group_2"] == "control")
+        & (result["metric_name"] == "orders")
     ].iloc[0]
+    assert orders_row["metric_type"] == "mean"
     assert orders_row["metric_control"] == pytest.approx((10 + 12 + 9) / 3)
     assert orders_row["metric_test"] == pytest.approx((13 + 15 + 11 + 14) / 4)
 
@@ -238,7 +245,9 @@ def test_compute_test_metrics_uses_raw_relative_fields() -> None:
     assert "mde_percentage" not in result.columns
 
     orders_row = result[
-        (result["groups"] == "test_a vs control") & (result["metric_name"] == "orders")
+        (result["group_1"] == "test_a")
+        & (result["group_2"] == "control")
+        & (result["metric_name"] == "orders")
     ].iloc[0]
     expected_control = (10 + 12 + 9) / 3
     expected_test = (13 + 15 + 11 + 14) / 4
@@ -256,8 +265,11 @@ def test_ratio_metrics_default_to_agg_level() -> None:
     )
 
     ratio_row = result[
-        (result["groups"] == "test_a vs control") & (result["metric_name"] == "[ratio] ctr")
+        (result["group_1"] == "test_a")
+        & (result["group_2"] == "control")
+        & (result["metric_name"] == "ctr")
     ].iloc[0]
+    assert ratio_row["metric_type"] == "ratio"
     assert ratio_row["metric_control"] == pytest.approx((5 + 3 + 4 + 2) / (10 + 8 + 0 + 4))
     assert ratio_row["metric_test"] == pytest.approx((7 + 5 + 6 + 8) / (14 + 10 + 12 + 16))
 

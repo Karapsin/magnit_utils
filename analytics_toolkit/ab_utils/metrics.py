@@ -37,8 +37,7 @@ def compute_test_metrics(
     - Missing metric values are ignored independently for each metric/group pair.
     - `mde_abs` and `mde_relative` use a two-sided normal approximation based
       on the observed sample variances.
-    - Ratio metrics can be passed through `ratio_metrics`; their output names are
-      tagged with `[ratio]`.
+    - Ratio metrics can be passed through `ratio_metrics`.
     """
 
     _validate_input_columns(df, group=group, user_id=user_id)
@@ -85,7 +84,14 @@ def compute_test_metrics(
                 mde_power=mde_power,
             )
             if include_groups:
-                row = {"groups": f"{test_group} vs {baseline_group}", **row}
+                row = {
+                    "metric_type": str(metric_definition["kind"]),
+                    "group_1": test_group,
+                    "group_2": baseline_group,
+                    **row,
+                }
+            else:
+                row = {"metric_type": str(metric_definition["kind"]), **row}
             rows.append(row)
 
     if multiple_comparisons_adjustment:
@@ -116,7 +122,9 @@ def compute_test_metrics(
     if multiple_comparisons_adjustment:
         columns.append("bootstrap_adj_p")
     if include_groups:
-        columns = ["groups", *columns]
+        columns = ["metric_type", "group_1", "group_2", *columns]
+    else:
+        columns = ["metric_type", *columns]
 
     for row in rows:
         row.pop("_metric_key", None)
@@ -196,7 +204,7 @@ def _build_metric_definitions(
     metric_definitions.extend(
         {
             "kind": "ratio",
-            "metric_key": f"[ratio] {ratio_spec['name']}",
+            "metric_key": ratio_spec["name"],
             "ratio_spec": ratio_spec,
         }
         for ratio_spec in ratio_specs
