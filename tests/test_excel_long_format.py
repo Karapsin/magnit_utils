@@ -107,6 +107,73 @@ def test_pivot_and_break_table_rejects_duplicates_within_group_slices(tmp_path: 
         )
 
 
+def test_pivot_and_break_table_accepts_multiple_value_columns(tmp_path: Path) -> None:
+    df = pd.DataFrame(
+        {
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "qr_group": ["ALL", "ALL"],
+            "ab_group": ["control", "test_1"],
+            "users": [100, 110],
+            "arpu": [2.5, 2.7],
+        }
+    )
+
+    output = tmp_path / "multi_value.xlsx"
+    tables = pivot_and_break_table(
+        df=df,
+        rows="metric",
+        value=["users", "arpu"],
+        output=output,
+        columns="ab_group",
+        break_by="qr_group",
+        sheet_by="start_dt",
+    )
+
+    assert tables["2026-03-30"][0].to_dict(orient="records") == [
+        {"metric": "users", "control": 100.0, "test_1": 110.0},
+        {"metric": "arpu", "control": 2.5, "test_1": 2.7},
+    ]
+
+    workbook = load_workbook(output, read_only=True, data_only=True)
+    try:
+        rows = list(workbook["2026-03-30"].iter_rows(values_only=True))
+        assert rows[:4] == [
+            ("qr_group = ALL", None, None),
+            ("metric", "control", "test_1"),
+            ("users", 100, 110),
+            ("arpu", 2.5, 2.7),
+        ]
+    finally:
+        workbook.close()
+
+
+def test_pivot_and_break_table_detects_value_columns_when_omitted(tmp_path: Path) -> None:
+    df = pd.DataFrame(
+        {
+            "start_dt": ["2026-03-30", "2026-03-30"],
+            "qr_group": ["ALL", "ALL"],
+            "ab_group": ["control", "test_1"],
+            "users": [100, 110],
+            "arpu": [2.5, 2.7],
+        }
+    )
+
+    output = tmp_path / "auto_value.xlsx"
+    tables = pivot_and_break_table(
+        df=df,
+        rows="metric",
+        output=output,
+        columns="ab_group",
+        break_by="qr_group",
+        sheet_by="start_dt",
+    )
+
+    assert tables["2026-03-30"][0].to_dict(orient="records") == [
+        {"metric": "users", "control": 100.0, "test_1": 110.0},
+        {"metric": "arpu", "control": 2.5, "test_1": 2.7},
+    ]
+
+
 def test_break_table_writes_grouped_raw_tables_without_uniqueness_checks(tmp_path: Path) -> None:
     df = pd.DataFrame(
         {

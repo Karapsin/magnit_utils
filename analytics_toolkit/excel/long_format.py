@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Sequence
 
 import pandas as pd
 from openpyxl import load_workbook
 
 _INVALID_SHEET_CHARS_RE = re.compile(r"[\[\]\*:/\\?]")
 _DEFAULT_SHEET_NAME = "Sheet1"
+_MELTED_VALUE_COLUMN = "__pivot_and_break_value__"
 
 
 def pivot_and_break_table(
     df: pd.DataFrame,
     rows: str,
-    value: str,
     output: str | Path,
+    value: str | Sequence[str] | None = None,
     columns: str | None = None,
     break_by: str | None = None,
     sheet_by: str | None = None,
@@ -24,23 +26,31 @@ def pivot_and_break_table(
     Returns the written tables grouped by the original ``sheet_by`` values. When
     ``sheet_by`` is omitted, the result contains a single ``None`` key.
     """
-    _validate_pivot_input(
+    value_columns = _normalize_value_columns(
+        df=df,
+        value=value,
+        rows=rows,
+        columns=columns,
+        break_by=break_by,
+        sheet_by=sheet_by,
+    )
+    normalized_df, normalized_value = _prepare_pivot_source(
         df=df,
         rows=rows,
-        value=value,
+        value_columns=value_columns,
         columns=columns,
         break_by=break_by,
         sheet_by=sheet_by,
     )
 
     sheet_tables = _build_sheet_tables(
-        df=df,
+        df=normalized_df,
         break_by=break_by,
         sheet_by=sheet_by,
         table_builder=lambda part: _build_pivot_table(
             df=part,
             rows=rows,
-            value=value,
+            value=normalized_value,
             columns=columns,
         ),
     )
@@ -86,26 +96,30 @@ def break_table(
 def _validate_pivot_input(
     df: pd.DataFrame,
     rows: str,
-    value: str,
+    value_columns: list[str],
     columns: str | None,
     break_by: str | None,
     sheet_by: str | None,
 ) -> None:
-    required_columns = [value, rows]
+    required_columns = list(value_columns)
     for column in (columns, break_by, sheet_by):
         if column is not None:
             required_columns.append(column)
+
+    if len(value_columns) == 1:
+        required_columns.append(rows)
 
     missing = sorted(column for column in required_columns if column not in df.columns)
     if missing:
         raise ValueError(f"Input dataframe is missing required columns: {missing}.")
 
     role_columns = {
-        "rows": rows,
         "columns": columns,
         "break_by": break_by,
         "sheet_by": sheet_by,
     }
+    if len(value_columns) == 1:
+        role_columns["rows"] = rows
     seen: dict[str, str] = {}
     for role, column in role_columns.items():
         if column is None:
@@ -116,6 +130,99 @@ def _validate_pivot_input(
             )
         seen[column] = role
 
+    if len(value_columns) == 1:
+        _validate_pivot_uniqueness(
+            df=df,
+            rows=rows,
+            columns=columns,
+            break_by=break_by,
+            sheet_by=sheet_by,
+        )
+
+
+def _normalize_value_columns(
+    df: pd.DataFrame,
+    value: str | Sequence[str] | None,
+    rows: str,
+    columns: str | None,
+    break_by: str | None,
+    sheet_by: str | None,
+) -> list[str]:
+    if value is None:
+        reserved_columns = {rows}
+        reserved_columns.update(column for column in (columns, break_by, sheet_by) if column is not None)
+        value_columns = [column for column in df.columns if column not in reserved_columns]
+    elif isinstance(value, str):
+        value_columns = [value]
+    else:
+        value_columns = list(value)
+
+    if not value_columns:
+        raise ValueError("'value' must contain at least one dataframe column.")
+
+    if any(not isinstance(column, str) for column in value_columns):
+        raise ValueError("'value' must be a column name or a sequence of column names.")
+
+    duplicates = sorted({column for column in value_columns if value_columns.count(column) > 1})
+    if duplicates:
+        raise ValueError(f"'value' contains duplicate columns: {duplicates}.")
+
+    return value_columns
+
+
+def _prepare_pivot_source(
+    df: pd.DataFrame,
+    rows: str,
+    value_columns: list[str],
+    columns: str | None,
+    break_by: str | None,
+    sheet_by: str | None,
+) -> tuple[pd.DataFrame, str]:
+    _validate_pivot_input(
+        df=df,
+        rows=rows,
+        value_columns=value_columns,
+        columns=columns,
+        break_by=break_by,
+        sheet_by=sheet_by,
+    )
+
+    if len(value_columns) == 1:
+        return df, value_columns[0]
+
+    protected_columns = {column for column in (columns, break_by, sheet_by) if column is not None}
+    if rows in protected_columns:
+        raise ValueError(
+            f"'rows'={rows!r} conflicts with an existing grouping column when multiple value columns are provided."
+        )
+    if rows in df.columns and rows not in value_columns:
+        raise ValueError(
+            f"'rows'={rows!r} already exists in the dataframe; choose a different name for the melted metric column."
+        )
+
+    melted_df = df.melt(
+        id_vars=[column for column in df.columns if column not in value_columns],
+        value_vars=value_columns,
+        var_name=rows,
+        value_name=_MELTED_VALUE_COLUMN,
+    )
+    _validate_pivot_uniqueness(
+        df=melted_df,
+        rows=rows,
+        columns=columns,
+        break_by=break_by,
+        sheet_by=sheet_by,
+    )
+    return melted_df, _MELTED_VALUE_COLUMN
+
+
+def _validate_pivot_uniqueness(
+    df: pd.DataFrame,
+    rows: str,
+    columns: str | None,
+    break_by: str | None,
+    sheet_by: str | None,
+) -> None:
     uniqueness_columns = [column for column in (sheet_by, break_by, rows, columns) if column is not None]
     duplicate_mask = df.duplicated(subset=uniqueness_columns, keep=False)
     if duplicate_mask.any():

@@ -22,6 +22,25 @@ pivoted_tables = pivot_and_break_table(
     sheet_by="start_dt",
 )
 
+wide_tables = pivot_and_break_table(
+    df=wide_dataframe,
+    rows="metric",
+    value=["users", "arpu"],
+    output="wide_report.xlsx",
+    columns="ab_group",
+    break_by="qr_group",
+    sheet_by="start_dt",
+)
+
+auto_value_tables = pivot_and_break_table(
+    df=wide_dataframe,
+    rows="metric",
+    output="auto_value_report.xlsx",
+    columns="ab_group",
+    break_by="qr_group",
+    sheet_by="start_dt",
+)
+
 raw_tables = break_table(
     df=dataframe,
     output="raw_report.xlsx",
