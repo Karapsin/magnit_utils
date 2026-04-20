@@ -46,10 +46,12 @@ def _execute_gp(
     random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
     gp_break_query: bool = False,
+    gp_commit_each_statement: bool = False,
 ) -> Any:
     statement: str | None = None
     try:
         with conn.cursor() as cursor:
+            should_commit_at_end = True
             if not gp_break_query:
                 time_print("Executing 1 statement set on gp")
                 statement = query
@@ -65,8 +67,12 @@ def _execute_gp(
                 ):
                     _maybe_print_query(statement, print_queries, split_preview=True)
                     cursor.execute(statement)
+                    if gp_commit_each_statement:
+                        conn.commit()
+                        should_commit_at_end = False
                     _maybe_sleep_between_queries(index, total, random_sleep_seconds)
-            conn.commit()
+            if should_commit_at_end:
+                conn.commit()
             return None
     except Exception:
         failed_query = statement if statement is not None else query
@@ -107,6 +113,7 @@ def execute_sql(
     random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
     gp_break_query: bool = False,
+    gp_commit_each_statement: bool = False,
 ) -> Any:
     normalized_type = connection_type.strip().lower()
     sql = query.strip()
@@ -126,6 +133,7 @@ def execute_sql(
             random_sleep_seconds=random_sleep_seconds,
             print_queries=print_queries,
             gp_break_query=gp_break_query,
+            gp_commit_each_statement=gp_commit_each_statement,
         )
     if normalized_type == "ch":
         return _execute_ch(
