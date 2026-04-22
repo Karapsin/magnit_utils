@@ -2,433 +2,13 @@
 
 This manual describes only the public functions exported by the main modules:
 
-- `analytics_toolkit.general`
+- `analytics_toolkit.sql`
 - `analytics_toolkit.dates`
+- `analytics_toolkit.general`
 - `analytics_toolkit.excel`
 - `analytics_toolkit.ab_utils`
-- `analytics_toolkit.sql`
 
 Examples were aligned to real usage patterns found in `../tickets/april_2026`. There is no `tickets/april_2024` directory in this workspace.
-
-## Module: `general`
-
-Typical import:
-
-```python
-from analytics_toolkit.general import here, read_file, time_print
-```
-
-### `here(filename)`
-
-Builds a path relative to the current script location.
-
-Inputs:
-
-- `filename`: file name or relative path, for example `"query.sql"` or `"sql/report.sql"`
-
-Returns:
-
-- String path to the file
-
-When to use:
-
-- When your script and SQL files live in the same working folder
-- When you want `read_file(here(...))` instead of hardcoding absolute paths
-
-Example:
-
-```python
-query_path = here("get_push_data.sql")
-```
-
-### `read_file(file_path, params_dict=None)`
-
-Reads a text file as UTF-8. If `params_dict` is passed, placeholders are filled with `str.format(...)`.
-
-Inputs:
-
-- `file_path`: path to the file
-- `params_dict`: optional dictionary for template substitution
-
-Returns:
-
-- File content as a string
-
-Notes:
-
-- Raises an error if the file does not exist
-- Useful for SQL templates with `{start_dt}`-style placeholders
-
-Example:
-
-```python
-query = read_file(
-    here("get_push_data.sql"),
-    params_dict={"start_dt": "2026-03-15", "end_dt": "2026-03-21"},
-)
-```
-
-### `time_print(message)`
-
-Prints a message with a timestamp.
-
-Inputs:
-
-- `message`: text to print
-
-Returns:
-
-- Nothing
-
-Example:
-
-```python
-time_print("starting load")
-```
-
-## Module: `dates`
-
-Typical import:
-
-```python
-from analytics_toolkit import dates as dt
-```
-
-Accepted date inputs:
-
-- ISO date string like `"2026-03-15"`
-- `datetime.date`
-- `datetime.datetime`
-
-Most functions return a string by default. Set `output_string=False` to get a `datetime`.
-
-### `dt.gen_dates_list(start_dt, end_dt, interval="days", output_string=True)`
-
-Builds a list of dates between two boundaries, inclusive.
-
-Inputs:
-
-- `start_dt`: first date
-- `end_dt`: last date
-- `interval`: `"days"`, `"weeks"`, or `"months"`
-- `output_string`: if `True`, returns strings; otherwise returns datetimes
-
-Returns:
-
-- List of dates
-
-Notes:
-
-- For `weeks`, dates are aligned to week starts
-- For `months`, dates are aligned to month starts
-- Returns an empty list if `end_dt < start_dt`
-
-Example:
-
-```python
-days_list = dt.gen_dates_list("2026-03-01", "2026-03-31", interval="days")
-```
-
-### `dt.first_day(dt_value, period="month", output_string=True)`
-
-Returns the first day of the week or month.
-
-Inputs:
-
-- `dt_value`: input date
-- `period`: `"week"` or `"month"`
-- `output_string`: output format flag
-
-Returns:
-
-- First day of the selected period
-
-Example:
-
-```python
-month_start = dt.first_day("2026-03-18", "month")
-```
-
-### `dt.last_day(dt_value, period="month", output_string=True)`
-
-Returns the last day of the week or month.
-
-Inputs:
-
-- `dt_value`: input date
-- `period`: `"week"` or `"month"`
-- `output_string`: output format flag
-
-Returns:
-
-- Last day of the selected period
-
-Example:
-
-```python
-week_end = dt.last_day("2026-03-18", "week")
-```
-
-### `dt.add_days(dt_value, n, output_string=True)`
-
-Adds or subtracts days.
-
-Inputs:
-
-- `dt_value`: input date
-- `n`: number of days, can be negative
-- `output_string`: output format flag
-
-Returns:
-
-- Shifted date
-
-Example:
-
-```python
-prev_day = dt.add_days("2026-03-18", -1)
-```
-
-### `dt.add_weeks(dt_value, n, output_string=True)`
-
-Adds or subtracts weeks.
-
-Inputs:
-
-- `dt_value`: input date
-- `n`: number of weeks
-- `output_string`: output format flag
-
-Returns:
-
-- Shifted date
-
-Notes:
-
-- The function aligns the input to the start of the week first
-
-Example:
-
-```python
-next_week = dt.add_weeks("2026-03-18", 1)
-```
-
-### `dt.add_months(dt_value, n, output_string=True)`
-
-Adds or subtracts months.
-
-Inputs:
-
-- `dt_value`: input date
-- `n`: number of months
-- `output_string`: output format flag
-
-Returns:
-
-- Shifted date
-
-Notes:
-
-- The function aligns the input to the first day of the month first
-
-Example:
-
-```python
-next_month = dt.add_months("2026-03-18", 1)
-```
-
-### `dt.get_today(output_string=True)`
-
-Returns today's date.
-
-Inputs:
-
-- `output_string`: output format flag
-
-Returns:
-
-- Today's date
-
-Example:
-
-```python
-today = dt.get_today()
-```
-
-### `dt.get_random_day(start_dt, end_dt, output_string=True)`
-
-Returns a random day inside a date range.
-
-Inputs:
-
-- `start_dt`: range start
-- `end_dt`: range end
-- `output_string`: output format flag
-
-Returns:
-
-- Random date from the inclusive range
-
-Example:
-
-```python
-random_day = dt.get_random_day("2026-03-01", "2026-03-20")
-```
-
-## Module: `excel`
-
-Typical import:
-
-```python
-from analytics_toolkit import excel
-```
-
-### `excel.pivot_and_break_table(df, rows, output, value=None, columns=None, break_by=None, sheet_by=None, append=False, enforce_same_row_order=False)`
-
-Writes one or more pivot-style tables to Excel.
-
-Inputs:
-
-- `df`: a dataframe or a list of dataframes
-- `rows`: column that becomes table rows
-- `output`: output Excel file path
-- `value`: one value column or a list of value columns; if omitted, remaining columns are used
-- `columns`: optional column used for pivoted columns
-- `break_by`: optional column that splits data into separate tables
-- `sheet_by`: optional column that splits data into separate sheets
-- `append`: if `True`, appends to an existing workbook
-- `enforce_same_row_order`: if `True`, aligns row order across multiple input dataframes
-
-Returns:
-
-- Dictionary with written tables
-
-When to use:
-
-- When you want report-like Excel output from long-format data
-
-Real usage pattern from tickets:
-
-```python
-excel.pivot_and_break_table(
-    [res_df, stats_uplifts_df, uplifts_df],
-    rows="metric",
-    columns="ab_group",
-    break_by="qr_group",
-    sheet_by="start_dt",
-    enforce_same_row_order=True,
-    output=here("prepared_results.xlsx"),
-    append=True,
-)
-```
-
-### `excel.break_table(df, output, break_by=None, sheet_by=None, append=False)`
-
-Writes dataframe slices to Excel without pivoting.
-
-Inputs:
-
-- `df`: a dataframe or a list of dataframes
-- `output`: output Excel file path
-- `break_by`: optional column that splits data into separate tables
-- `sheet_by`: optional column that splits data into separate sheets
-- `append`: if `True`, appends to an existing workbook
-
-Returns:
-
-- Dictionary with written tables
-
-When to use:
-
-- When the dataframe is already in final shape and only needs to be split into sheets or blocks
-
-Real usage pattern from tickets:
-
-```python
-excel.break_table(
-    metrics_df.assign(start_dt=lambda x: x["start_dt"].apply(lambda v: f"{v}_metrics")),
-    sheet_by="start_dt",
-    output=here("prepared_results.xlsx"),
-    append=True,
-)
-```
-
-## Module: `ab_utils`
-
-Typical import:
-
-```python
-from analytics_toolkit import ab_utils as ab
-```
-
-### `ab.compute_test_metrics(df, group="group_name", control="control", user_id="user_id", mde_alpha=0.05, mde_power=0.80, ratio_metrics=None, test_vs_test=True, multiple_comparisons_adjustment=False, multiple_comparisons_adjustment_resamples=2000, bootstrap_random_state=0, bootstrap_n_jobs=1, bootstrap_progress=True, pre_exp_metrics_df=None)`
-
-Computes A/B test metrics and statistical comparisons.
-
-Inputs:
-
-- `df`: main dataframe with one row per user
-- `group`: column with test/control labels
-- `control`: control group label
-- `user_id`: unique user id column
-- `mde_alpha`: significance level for MDE calculation
-- `mde_power`: power for MDE calculation
-- `ratio_metrics`: optional list of ratio metric definitions
-- `test_vs_test`: if `True`, also compares test groups with each other
-- `multiple_comparisons_adjustment`: enables bootstrap-adjusted p-values
-- `multiple_comparisons_adjustment_resamples`: bootstrap iterations
-- `bootstrap_random_state`: random seed or `None`
-- `bootstrap_n_jobs`: parallel workers for bootstrap
-- `bootstrap_progress`: show bootstrap progress bar
-- `pre_exp_metrics_df`: optional pre-experiment dataframe for CUPED p-values
-
-Returns:
-
-- Dataframe with metric results
-
-Expected input structure:
-
-- `df` must contain one row per user
-- All columns except `group` and `user_id` are treated as metrics
-- `ratio_metrics` entries should look like this:
-
-```python
-{
-    "name": "ARPPU",
-    "numerator": "revenue",
-    "denominator": "trn_flg"
-}
-```
-
-Important output columns:
-
-- `metric_name`
-- `group_1`
-- `group_2`
-- `metric_control`
-- `metric_test`
-- `delta_abs`
-- `delta_relative`
-- `mde_abs`
-- `mde_relative`
-- `p-value`
-- `p-value CUPED` if `pre_exp_metrics_df` is provided
-
-Real usage pattern from tickets:
-
-```python
-ratio_metrics = [
-    {"name": "ARPPU", "numerator": "revenue", "denominator": "trn_flg"},
-    {"name": "AOV", "numerator": "revenue", "denominator": "trn"},
-]
-
-metrics_df = ab.compute_test_metrics(
-    user_df,
-    pre_exp_metrics_df=pre_exp_df,
-    ratio_metrics=ratio_metrics,
-    test_vs_test=False,
-)
-```
 
 ## Module: `sql`
 
@@ -636,4 +216,437 @@ def run_check(conn, table_name):
     with conn.cursor() as cur:
         cur.execute(f"select count(*) from {table_name}")
         return cur.fetchone()[0]
+```
+
+## Module: `dates`
+
+Typical import:
+
+```python
+from analytics_toolkit import dates as dt
+```
+
+Accepted date inputs:
+
+- ISO date string like `"2026-03-15"`
+- `datetime.date`
+- `datetime.datetime`
+
+Most functions return a string by default. Set `output_string=False` to get a `datetime`.
+
+### `dt.gen_dates_list(start_dt, end_dt, interval="days", output_string=True)`
+
+Builds a list of dates between two boundaries, inclusive.
+
+Inputs:
+
+- `start_dt`: first date
+- `end_dt`: last date
+- `interval`: `"days"`, `"weeks"`, or `"months"`
+- `output_string`: if `True`, returns strings; otherwise returns datetimes
+
+Returns:
+
+- List of dates
+
+Notes:
+
+- For `weeks`, dates are aligned to week starts
+- For `months`, dates are aligned to month starts
+- Returns an empty list if `end_dt < start_dt`
+
+Example:
+
+```python
+days_list = dt.gen_dates_list("2026-03-01", "2026-03-31", interval="days")
+```
+
+### `dt.first_day(dt_value, period="month", output_string=True)`
+
+Returns the first day of the week or month.
+
+Inputs:
+
+- `dt_value`: input date
+- `period`: `"week"` or `"month"`
+- `output_string`: output format flag
+
+Returns:
+
+- First day of the selected period
+
+Example:
+
+```python
+month_start = dt.first_day("2026-03-18", "month")
+```
+
+### `dt.last_day(dt_value, period="month", output_string=True)`
+
+Returns the last day of the week or month.
+
+Inputs:
+
+- `dt_value`: input date
+- `period`: `"week"` or `"month"`
+- `output_string`: output format flag
+
+Returns:
+
+- Last day of the selected period
+
+Example:
+
+```python
+week_end = dt.last_day("2026-03-18", "week")
+```
+
+### `dt.add_days(dt_value, n, output_string=True)`
+
+Adds or subtracts days.
+
+Inputs:
+
+- `dt_value`: input date
+- `n`: number of days, can be negative
+- `output_string`: output format flag
+
+Returns:
+
+- Shifted date
+
+Example:
+
+```python
+prev_day = dt.add_days("2026-03-18", -1)
+```
+
+### `dt.add_weeks(dt_value, n, output_string=True)`
+
+Adds or subtracts weeks.
+
+Inputs:
+
+- `dt_value`: input date
+- `n`: number of weeks
+- `output_string`: output format flag
+
+Returns:
+
+- Shifted date
+
+Notes:
+
+- The function aligns the input to the start of the week first
+
+Example:
+
+```python
+next_week = dt.add_weeks("2026-03-18", 1)
+```
+
+### `dt.add_months(dt_value, n, output_string=True)`
+
+Adds or subtracts months.
+
+Inputs:
+
+- `dt_value`: input date
+- `n`: number of months
+- `output_string`: output format flag
+
+Returns:
+
+- Shifted date
+
+Notes:
+
+- The function aligns the input to the first day of the month first
+
+Example:
+
+```python
+next_month = dt.add_months("2026-03-18", 1)
+```
+
+### `dt.get_today(output_string=True)`
+
+Returns today's date.
+
+Inputs:
+
+- `output_string`: output format flag
+
+Returns:
+
+- Today's date
+
+Example:
+
+```python
+today = dt.get_today()
+```
+
+### `dt.get_random_day(start_dt, end_dt, output_string=True)`
+
+Returns a random day inside a date range.
+
+Inputs:
+
+- `start_dt`: range start
+- `end_dt`: range end
+- `output_string`: output format flag
+
+Returns:
+
+- Random date from the inclusive range
+
+Example:
+
+```python
+random_day = dt.get_random_day("2026-03-01", "2026-03-20")
+```
+
+## Module: `general`
+
+Typical import:
+
+```python
+from analytics_toolkit.general import here, read_file, time_print
+```
+
+### `here(filename)`
+
+Builds a path relative to the current script location.
+
+Inputs:
+
+- `filename`: file name or relative path, for example `"query.sql"` or `"sql/report.sql"`
+
+Returns:
+
+- String path to the file
+
+When to use:
+
+- When your script and SQL files live in the same working folder
+- When you want `read_file(here(...))` instead of hardcoding absolute paths
+
+Important:
+
+- First call `os.chdir(...)` to switch into the ticket folder, then use `here(...)`
+
+Example:
+
+```python
+import os
+
+os.chdir("/path/to/dir")
+
+# reads file /path/to/dir/get_push_data.sql
+query = read_file(here("get_push_data.sql"))
+df = sql.read('gp', query)
+
+# saves df to /path/to/dir/output.xlsx
+df.to_excel(here("output.xlsx"))
+```
+
+### `read_file(file_path, params_dict=None)`
+
+Reads a text file as UTF-8. If `params_dict` is passed, placeholders are filled with `str.format(...)`.
+
+Inputs:
+
+- `file_path`: path to the file
+- `params_dict`: optional dictionary for template substitution
+
+Returns:
+
+- File content as a string
+
+Notes:
+
+- Raises an error if the file does not exist
+- Useful for SQL templates with `{start_dt}`-style placeholders
+
+Example:
+
+```python
+query = read_file(
+    here("get_push_data.sql"),
+    params_dict={"start_dt": "2026-03-15", "end_dt": "2026-03-21"},
+)
+```
+
+### `time_print(message)`
+
+Prints a message with a timestamp.
+
+Inputs:
+
+- `message`: text to print
+
+Returns:
+
+- Nothing
+
+Example:
+
+```python
+time_print("starting load")
+```
+
+## Module: `excel`
+
+Typical import:
+
+```python
+from analytics_toolkit import excel
+```
+
+### `excel.pivot_and_break_table(df, rows, output, value=None, columns=None, break_by=None, sheet_by=None, append=False, enforce_same_row_order=False)`
+
+Writes one or more pivot-style tables to Excel.
+
+Inputs:
+
+- `df`: a dataframe or a list of dataframes
+- `rows`: column that becomes table rows
+- `output`: output Excel file path
+- `value`: one value column or a list of value columns; if omitted, remaining columns are used
+- `columns`: optional column used for pivoted columns
+- `break_by`: optional column that splits data into separate tables
+- `sheet_by`: optional column that splits data into separate sheets
+- `append`: if `True`, appends to an existing workbook
+- `enforce_same_row_order`: if `True`, aligns row order across multiple input dataframes
+
+Returns:
+
+- Dictionary with written tables
+
+When to use:
+
+- When you want report-like Excel output from long-format data
+
+Real usage pattern from tickets:
+
+```python
+excel.pivot_and_break_table(
+    [res_df, stats_uplifts_df, uplifts_df],
+    rows="metric",
+    columns="ab_group",
+    break_by="qr_group",
+    sheet_by="start_dt",
+    enforce_same_row_order=True,
+    output=here("prepared_results.xlsx"),
+    append=True,
+)
+```
+
+### `excel.break_table(df, output, break_by=None, sheet_by=None, append=False)`
+
+Writes dataframe slices to Excel without pivoting.
+
+Inputs:
+
+- `df`: a dataframe or a list of dataframes
+- `output`: output Excel file path
+- `break_by`: optional column that splits data into separate tables
+- `sheet_by`: optional column that splits data into separate sheets
+- `append`: if `True`, appends to an existing workbook
+
+Returns:
+
+- Dictionary with written tables
+
+When to use:
+
+- When the dataframe is already in final shape and only needs to be split into sheets or blocks
+
+Real usage pattern from tickets:
+
+```python
+excel.break_table(
+    metrics_df.assign(start_dt=lambda x: x["start_dt"].apply(lambda v: f"{v}_metrics")),
+    sheet_by="start_dt",
+    output=here("prepared_results.xlsx"),
+    append=True,
+)
+```
+
+## Module: `ab_utils`
+
+Typical import:
+
+```python
+from analytics_toolkit import ab_utils as ab
+```
+
+### `ab.compute_test_metrics(df, group="group_name", control="control", user_id="user_id", mde_alpha=0.05, mde_power=0.80, ratio_metrics=None, test_vs_test=True, multiple_comparisons_adjustment=False, multiple_comparisons_adjustment_resamples=2000, bootstrap_random_state=0, bootstrap_n_jobs=1, bootstrap_progress=True, pre_exp_metrics_df=None)`
+
+Computes A/B test metrics and statistical comparisons.
+
+Inputs:
+
+- `df`: main dataframe with one row per user
+- `group`: column with test/control labels
+- `control`: control group label
+- `user_id`: unique user id column
+- `mde_alpha`: significance level for MDE calculation
+- `mde_power`: power for MDE calculation
+- `ratio_metrics`: optional list of ratio metric definitions
+- `test_vs_test`: if `True`, also compares test groups with each other
+- `multiple_comparisons_adjustment`: enables bootstrap-adjusted p-values
+- `multiple_comparisons_adjustment_resamples`: bootstrap iterations
+- `bootstrap_random_state`: random seed or `None`
+- `bootstrap_n_jobs`: parallel workers for bootstrap
+- `bootstrap_progress`: show bootstrap progress bar
+- `pre_exp_metrics_df`: optional pre-experiment dataframe for CUPED p-values
+
+Returns:
+
+- Dataframe with metric results
+
+Expected input structure:
+
+- `df` must contain one row per user
+- All columns except `group` and `user_id` are treated as metrics
+- `ratio_metrics` entries should look like this:
+
+```python
+{
+    "name": "ARPPU",
+    "numerator": "revenue",
+    "denominator": "trn_flg"
+}
+```
+
+Important output columns:
+
+- `metric_name`
+- `group_1`
+- `group_2`
+- `metric_control`
+- `metric_test`
+- `delta_abs`
+- `delta_relative`
+- `mde_abs`
+- `mde_relative`
+- `p-value`
+- `p-value CUPED` if `pre_exp_metrics_df` is provided
+
+Real usage pattern from tickets:
+
+```python
+ratio_metrics = [
+    {"name": "ARPPU", "numerator": "revenue", "denominator": "trn_flg"},
+    {"name": "AOV", "numerator": "revenue", "denominator": "trn"},
+]
+
+metrics_df = ab.compute_test_metrics(
+    user_df,
+    pre_exp_metrics_df=pre_exp_df,
+    ratio_metrics=ratio_metrics,
+    test_vs_test=False,
+)
 ```
