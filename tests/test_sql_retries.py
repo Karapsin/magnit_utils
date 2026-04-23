@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 execute_sql_module = importlib.import_module("analytics_toolkit.sql.dml.io.execute_sql")
 read_sql_module = importlib.import_module("analytics_toolkit.sql.dml.io.read_sql")
 load_df_module = importlib.import_module("analytics_toolkit.sql.dml.load.load_df")
+retry_module = importlib.import_module("analytics_toolkit.sql.dml.transfer.runtime.retry")
 
 
 class FakeConnection:
@@ -24,6 +25,14 @@ class FakeConnection:
 
     def rollback(self) -> None:
         self.rollback_calls += 1
+
+
+class FakeUndefinedTableError(Exception):
+    pgcode = "42P01"
+
+
+class FakeTrinoSyntaxError(Exception):
+    error_name = "SYNTAX_ERROR"
 
 
 def test_read_sql_retries_whole_flow_with_fresh_gp_connection(monkeypatch) -> None:
@@ -61,6 +70,43 @@ def test_read_sql_retries_whole_flow_with_fresh_gp_connection(monkeypatch) -> No
     assert second_connection.close_calls == 1
 
 
+def test_read_sql_does_not_retry_undefined_table(monkeypatch) -> None:
+    first_connection = FakeConnection("first")
+    second_connection = FakeConnection("second")
+    connections = [first_connection, second_connection]
+    attempts: list[str] = []
+
+    monkeypatch.setattr(
+        read_sql_module,
+        "get_sql_connection",
+        lambda connection_type: connections.pop(0),
+    )
+
+    def fake_read_gp(conn: FakeConnection, query: str, print_queries: bool = True) -> pd.DataFrame:
+        attempts.append(conn.name)
+        raise FakeUndefinedTableError('relation "missing_table" does not exist')
+
+    monkeypatch.setattr(read_sql_module, "_read_gp", fake_read_gp)
+
+    try:
+        read_sql_module.read_sql(
+            "gp",
+            "select * from missing_table",
+            retry_cnt=3,
+            timeout_increment=0,
+        )
+    except FakeUndefinedTableError:
+        pass
+    else:
+        raise AssertionError("Expected undefined-table error to be raised.")
+
+    assert attempts == ["first"]
+    assert len(connections) == 1
+    assert first_connection.rollback_calls == 1
+    assert first_connection.close_calls == 1
+    assert second_connection.close_calls == 0
+
+
 def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> None:
     first_connection = FakeConnection("first")
     second_connection = FakeConnection("second")
@@ -96,6 +142,28 @@ def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> No
     assert attempts == ["first", "second"]
     assert first_connection.close_calls == 1
     assert second_connection.close_calls == 1
+
+
+def test_run_with_retry_does_not_retry_trino_syntax_error() -> None:
+    attempts: list[int] = []
+
+    def operation(attempt: int) -> None:
+        attempts.append(attempt)
+        raise FakeTrinoSyntaxError("line 1:8: mismatched input 'fromm'")
+
+    try:
+        retry_module.run_with_retry(
+            operation_name="executing SQL on trino",
+            retry_cnt=3,
+            timeout_increment=0,
+            operation=operation,
+        )
+    except FakeTrinoSyntaxError:
+        pass
+    else:
+        raise AssertionError("Expected syntax error to be raised.")
+
+    assert attempts == [1]
 
 
 def test_load_df_retries_whole_flow_from_start(monkeypatch) -> None:
