@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator, Sequence
+from itertools import islice
 from typing import Any
 
 import pandas as pd
@@ -15,6 +17,9 @@ class AmbiguousTableLoadError(Exception):
     pass
 
 
+DEFAULT_TRINO_INSERT_CHUNK_SIZE = 1000
+
+
 def insert_table_batch(
     connection_type: str,
     connection_ref: dict[str, Any],
@@ -24,8 +29,9 @@ def insert_table_batch(
     retry_cnt: int,
     timeout_increment: int | float,
     target_column_types: dict[str, str] | None = None,
+    trino_insert_chunk_size: int | None = None,
 ) -> int:
-    normalized_batch = normalize_batch(batch)
+    normalized_batch = normalize_batch(batch) if connection_type != "trino" else batch
 
     def operation(attempt: int) -> int:
         connection = connection_ref["connection"]
@@ -39,6 +45,7 @@ def insert_table_batch(
                     table_name,
                     normalized_batch,
                     target_column_types=target_column_types,
+                    trino_insert_chunk_size=trino_insert_chunk_size,
                 )
                 return len(normalized_batch)
             if connection_type == "ch":
@@ -99,23 +106,21 @@ def _insert_trino_batch(
     table_name: str,
     batch: pd.DataFrame,
     target_column_types: dict[str, str] | None = None,
+    trino_insert_chunk_size: int | None = None,
 ) -> None:
     column_list = column_list_sql(batch.columns, "trino")
+    column_count = len(batch.columns)
+    row_placeholders = f"({', '.join('?' for _ in range(column_count))})"
+    chunk_size = _get_trino_insert_chunk_size(trino_insert_chunk_size)
     cursor = connection.cursor()
     try:
-        rows = list(_iter_trino_rows(batch, target_column_types))
-        for row_chunk in _chunk_rows(rows, 1000):
-            values_sql = ", ".join(
-                _build_trino_values_tuple(
-                    batch.columns,
-                    row,
-                    target_column_types,
-                )
-                for row in row_chunk
-            )
+        row_iterator = _iter_trino_rows(batch, target_column_types)
+        for row_chunk in _chunk_rows(row_iterator, chunk_size):
+            values_sql = ", ".join(row_placeholders for _ in row_chunk)
+            params = [value for row in row_chunk for value in row]
             sql = f"INSERT INTO {table_name} ({column_list}) VALUES {values_sql}"
             time_print(f"Writing {len(row_chunk)} row(s) to trino table {table_name}")
-            cursor.execute(sql)
+            cursor.execute(sql, params)
     finally:
         cursor.close()
 
@@ -141,6 +146,9 @@ def _iter_trino_rows(
 
 
 def _normalize_trino_value(value: Any, target_type: str | None) -> Any:
+    if _is_null_like(value):
+        return None
+
     if value is None:
         return None
 
@@ -169,11 +177,14 @@ def _build_trino_values_tuple(
 
 
 def _chunk_rows(
-    rows: Sequence[tuple[Any, ...]],
+    rows: Iterator[tuple[Any, ...]],
     chunk_size: int,
 ) -> Iterator[list[tuple[Any, ...]]]:
-    for index in range(0, len(rows), chunk_size):
-        yield list(rows[index : index + chunk_size])
+    while True:
+        chunk = list(islice(rows, chunk_size))
+        if not chunk:
+            return
+        yield chunk
 
 
 def _trino_literal(value: Any, target_type: str | None) -> str:
@@ -207,3 +218,33 @@ def _trino_literal(value: Any, target_type: str | None) -> str:
     if normalized_target_type:
         return f"CAST('{escaped}' AS {target_type})"
     return f"'{escaped}'"
+
+
+def _get_trino_insert_chunk_size(explicit_value: int | None) -> int:
+    if explicit_value is not None:
+        if explicit_value <= 0:
+            raise ValueError("trino_insert_chunk_size must be a positive integer.")
+        return explicit_value
+
+    raw_value = os.getenv("TRINO_INSERT_CHUNK_SIZE", "").strip()
+    if not raw_value:
+        return DEFAULT_TRINO_INSERT_CHUNK_SIZE
+
+    try:
+        chunk_size = int(raw_value)
+    except ValueError as exc:
+        raise ValueError("TRINO_INSERT_CHUNK_SIZE must be a positive integer.") from exc
+
+    if chunk_size <= 0:
+        raise ValueError("TRINO_INSERT_CHUNK_SIZE must be a positive integer.")
+    return chunk_size
+
+
+def _is_null_like(value: Any) -> bool:
+    if value is None:
+        return True
+
+    try:
+        return bool(pd.isna(value))
+    except TypeError:
+        return False

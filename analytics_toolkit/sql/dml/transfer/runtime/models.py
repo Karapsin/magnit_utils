@@ -20,6 +20,7 @@ class TransferOptions:
     full_timeout_increment: int | float = 60 * 10
     key_columns: list[str] | None = None
     gp_distributed_by_key: list[str] | None = None
+    trino_insert_chunk_size: int | None = None
 
 
 @dataclass

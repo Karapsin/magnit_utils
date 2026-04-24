@@ -10,6 +10,7 @@ class LoadOptions:
     append: bool = False
     gp_distributed_by_key: list[str] | None = None
     key_columns: list[str] | None = None
+    trino_insert_chunk_size: int | None = None
 
 
 @dataclass

@@ -35,6 +35,7 @@ def load_df(
     key_columns: list[str] | None = None,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
+    trino_insert_chunk_size: int | None = None,
 ) -> int:
     if not isinstance(df, pd.DataFrame):
         raise TypeError("df must be a pandas DataFrame.")
@@ -49,6 +50,7 @@ def load_df(
         append=append,
         gp_distributed_by_key=gp_distributed_by_key,
         key_columns=key_columns,
+        trino_insert_chunk_size=trino_insert_chunk_size,
     )
     def operation(attempt: int) -> int:
         connection_ref = {"connection": get_sql_connection(options.connection_type)}
@@ -140,6 +142,7 @@ def _build_load_options(
     append: bool,
     gp_distributed_by_key: list[str] | None,
     key_columns: list[str] | None,
+    trino_insert_chunk_size: int | None,
 ) -> LoadOptions:
     options = LoadOptions(
         connection_type=connection_type.strip().lower(),
@@ -147,6 +150,7 @@ def _build_load_options(
         append=append,
         gp_distributed_by_key=_normalize_gp_distributed_by_key(gp_distributed_by_key),
         key_columns=normalize_key_columns(key_columns),
+        trino_insert_chunk_size=trino_insert_chunk_size,
     )
 
     if options.connection_type not in {"trino", "gp", "ch"}:
@@ -157,6 +161,8 @@ def _build_load_options(
         raise ValueError("destination_table must not be empty.")
     if options.gp_distributed_by_key and options.connection_type != "gp":
         raise ValueError("gp_distributed_by_key can only be used when connection_type='gp'.")
+    if options.trino_insert_chunk_size is not None and options.trino_insert_chunk_size <= 0:
+        raise ValueError("trino_insert_chunk_size must be a positive integer.")
     return options
 
 
@@ -183,6 +189,7 @@ def _load_dataframe(
             retry_cnt=1,
             timeout_increment=0,
             target_column_types=state.target_column_types,
+            trino_insert_chunk_size=options.trino_insert_chunk_size,
         )
         validate_stage_target_key_overlap(
             connection_type=options.connection_type,
@@ -210,6 +217,7 @@ def _load_dataframe(
         retry_cnt=1,
         timeout_increment=0,
         target_column_types=state.target_column_types,
+        trino_insert_chunk_size=options.trino_insert_chunk_size,
     )
 
 

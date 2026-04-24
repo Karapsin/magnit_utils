@@ -101,6 +101,7 @@ def load_stage_batches(
             retry_cnt=insert_retry_cnt,
             timeout_increment=options.timeout_increment,
             target_column_types=stage_state.stage_column_types,
+            trino_insert_chunk_size=options.trino_insert_chunk_size,
         )
         total_rows += inserted_rows
         time_print(

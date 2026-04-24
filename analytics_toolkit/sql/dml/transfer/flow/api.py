@@ -25,6 +25,7 @@ def transfer_table(
     full_timeout_increment: int | float = 60 * 10,
     key_columns: list[str] | None = None,
     gp_distributed_by_key: list[str] | None = None,
+    trino_insert_chunk_size: int | None = None,
 ) -> int:
     options = build_transfer_options(
         from_db=from_db,
@@ -39,6 +40,7 @@ def transfer_table(
         full_timeout_increment=full_timeout_increment,
         key_columns=key_columns,
         gp_distributed_by_key=gp_distributed_by_key,
+        trino_insert_chunk_size=trino_insert_chunk_size,
     )
 
     time_print(
@@ -109,6 +111,7 @@ def build_transfer_options(
     full_timeout_increment: int | float,
     key_columns: list[str] | None,
     gp_distributed_by_key: list[str] | None,
+    trino_insert_chunk_size: int | None,
 ) -> TransferOptions:
     options = TransferOptions(
         from_db=normalize_connection_type(from_db),
@@ -123,6 +126,7 @@ def build_transfer_options(
         full_timeout_increment=full_timeout_increment,
         key_columns=normalize_key_columns(key_columns),
         gp_distributed_by_key=normalize_key_columns(gp_distributed_by_key),
+        trino_insert_chunk_size=trino_insert_chunk_size,
     )
 
     if options.from_db == options.to_db:
@@ -143,6 +147,8 @@ def build_transfer_options(
         raise ValueError("full_timeout_increment must be non-negative.")
     if options.gp_distributed_by_key is not None and options.to_db != "gp":
         raise ValueError("gp_distributed_by_key can only be used when to_db is 'gp'.")
+    if options.trino_insert_chunk_size is not None and options.trino_insert_chunk_size <= 0:
+        raise ValueError("trino_insert_chunk_size must be a positive integer.")
     return options
 
 

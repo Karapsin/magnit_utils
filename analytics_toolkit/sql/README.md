@@ -16,7 +16,7 @@ sql.execute(..., retry_cnt=5, timeout_increment=5)
 sql.gp_vacuum(...)
 sql.create_sql_table(...)
 sql.load_df(..., retry_cnt=5, timeout_increment=5)
-sql.transfer(...)
+sql.transfer(..., trino_insert_chunk_size=1000)
 sql.get_sql_connection(...)
 ```
 
@@ -34,6 +34,11 @@ sql.get_sql_connection(...)
 `read_sql`, `execute_sql`, `load_df`, and `transfer_table` all support
 `retry_cnt` and `timeout_increment`. Retries restart the whole public operation
 from the beginning with a fresh connection.
+
+For Trino targets, `load_df` and `transfer_table` also accept
+`trino_insert_chunk_size` to control how many rows are sent in each
+parameterized multi-row insert statement. If omitted, the package falls back to
+`TRINO_INSERT_CHUNK_SIZE` from the environment, then to the internal default.
 
 ## Greenplum Maintenance
 
