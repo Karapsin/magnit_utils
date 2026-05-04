@@ -8,6 +8,7 @@ import sqlparse
 from tqdm import tqdm
 
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
+from ...connection.config import get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
 from ..transfer.runtime.retry import rollback_quietly, run_with_retry
 from analytics_toolkit.general import time_print
@@ -115,7 +116,9 @@ def execute_sql(
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
 ) -> Any:
-    normalized_type = connection_type.strip().lower()
+    config = get_connection_config(connection_type)
+    connection_key = config.connection_key
+    backend = config.backend
     sql = query.strip()
 
     if not sql:
@@ -126,16 +129,16 @@ def execute_sql(
         raise ValueError("timeout_increment must be non-negative.")
 
     def operation(attempt: int) -> Any:
-        connection = get_sql_connection(normalized_type)
+        connection = get_sql_connection(connection_key)
         try:
-            if normalized_type == "trino":
+            if backend == "trino":
                 return _execute_trino(
                     connection,
                     sql,
                     random_sleep_seconds=random_sleep_seconds,
                     print_queries=print_queries,
                 )
-            if normalized_type == "gp":
+            if backend == "gp":
                 return _execute_gp(
                     connection,
                     sql,
@@ -144,7 +147,7 @@ def execute_sql(
                     gp_break_query=gp_break_query,
                     gp_commit_each_statement=gp_commit_each_statement,
                 )
-            if normalized_type == "ch":
+            if backend == "ch":
                 return _execute_ch(
                     connection,
                     sql,
@@ -155,15 +158,15 @@ def execute_sql(
                 "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
             )
         except Exception:
-            if normalized_type == "gp":
+            if backend == "gp":
                 rollback_quietly(connection)
             raise
         finally:
-            time_print(f"Closing {normalized_type} connection")
+            time_print(f"Closing {connection_key} connection")
             connection.close()
 
     return run_with_retry(
-        operation_name=f"executing SQL on {normalized_type}",
+        operation_name=f"executing SQL on {connection_key} ({backend})",
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
         operation=operation,

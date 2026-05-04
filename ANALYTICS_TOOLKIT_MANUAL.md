@@ -18,11 +18,20 @@ Typical import:
 from analytics_toolkit import sql
 ```
 
-Supported database keys:
+Database keys are configured in `.connections`. The package searches from
+the current working directory upward through parent directories. Each key is a
+connection alias and each value must define `type` as `'trino'`, `'gp'`, or
+`'ch'`, so multiple aliases can point to the same backend type.
 
-- `'trino'`
-- `'gp'`
-- `'ch'`
+Example:
+
+```json
+{
+  "gp": {"type": "gp", "host": "...", "user": "...", "password": "...", "database": "..."},
+  "gp_sandbox": {"type": "gp", "host": "...", "user": "...", "password": "...", "database": "..."},
+  "trino": {"type": "trino", "host": "...", "user": "..."}
+}
+```
 
 ### `sql.read(connection_type, query, print_queries=True, retry_cnt=5, timeout_increment=5)`
 
@@ -105,7 +114,8 @@ Inputs:
 - `full_timeout_increment`: wait time multiplier for full transfer restarts
 - `key_columns`: optional key columns used for duplicate protection
 - `gp_distributed_by_key`: optional Greenplum distribution key list
-- `trino_insert_chunk_size`: optional Trino insert chunk size
+- `trino_insert_chunk_size`: optional Trino insert chunk size; overrides the
+  target Trino connection's `insert_chunk_size`
 - `ch_partition_by`: optional ClickHouse shard partition column list or expression
 - `ch_order_by`: optional ClickHouse shard order column list or expression
 - `ch_engine`: ClickHouse shard engine, defaults to `ReplicatedMergeTree`
@@ -158,7 +168,8 @@ Inputs:
 - `key_columns`: optional key columns used to protect against duplicates during append
 - `retry_cnt`: retry count
 - `timeout_increment`: wait time multiplier between retries
-- `trino_insert_chunk_size`: optional Trino insert chunk size
+- `trino_insert_chunk_size`: optional Trino insert chunk size; overrides the
+  target Trino connection's `insert_chunk_size`
 - `ch_partition_by`: optional ClickHouse shard partition column list or expression
 - `ch_order_by`: optional ClickHouse shard order column list or expression
 - `ch_engine`: ClickHouse shard engine, defaults to `ReplicatedMergeTree`

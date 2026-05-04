@@ -12,7 +12,7 @@ from analytics_toolkit.sql.connection.errors import InvalidSqlInputError
 def here(filename: str) -> str:
     normalized_name = Path(filename.replace("\\", "/"))
 
-    base_dir = _resolve_base_dir()
+    base_dir = _resolve_main_file_dir()
     if base_dir is not None:
         return str(base_dir / normalized_name)
 
@@ -28,12 +28,16 @@ def here(filename: str) -> str:
 
 
 def _resolve_base_dir() -> Path | None:
+    main_dir = _resolve_main_file_dir()
+    if main_dir is not None:
+        return main_dir
+
     main_module = sys.modules.get("__main__")
     main_file = getattr(main_module, "__file__", None)
     if main_file and not str(main_file).startswith("<"):
         main_path = Path(main_file).expanduser().resolve()
-        if not _is_runtime_path(main_path):
-            return main_path.parent
+        if _is_runtime_path(main_path):
+            return None
 
     module_path = Path(__file__).expanduser().resolve()
     for frame_info in inspect.stack()[1:]:
@@ -46,6 +50,16 @@ def _resolve_base_dir() -> Path | None:
             continue
         return frame_path.parent
 
+    return None
+
+
+def _resolve_main_file_dir() -> Path | None:
+    main_module = sys.modules.get("__main__")
+    main_file = getattr(main_module, "__file__", None)
+    if main_file and not str(main_file).startswith("<"):
+        main_path = Path(main_file).expanduser().resolve()
+        if not _is_runtime_path(main_path):
+            return main_path.parent
     return None
 
 

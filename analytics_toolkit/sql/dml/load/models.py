@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class LoadOptions:
-    connection_type: str
+    connection_key: str
+    connection_backend: str
     destination_table: str
     append: bool = False
     gp_distributed_by_key: list[str] | None = None

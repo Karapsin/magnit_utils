@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from ...connection.config import resolve_connection_backend
 from ...ddl.create_sql_table import column_list_sql, quote_identifier
 from ...connection.errors import UnsupportedConnectionTypeError
 from analytics_toolkit.general import time_print
@@ -91,6 +92,7 @@ def _stage_has_duplicate_keys(
     stage_table: str,
     key_columns: Sequence[str],
 ) -> bool:
+    backend = resolve_connection_backend(connection_type)
     key_sql = column_list_sql(key_columns, connection_type)
     query = (
         f"SELECT 1 FROM {stage_table} "
@@ -99,7 +101,7 @@ def _stage_has_duplicate_keys(
         "LIMIT 1"
     )
 
-    if connection_type in {"gp", "trino"}:
+    if backend in {"gp", "trino"}:
         cursor = connection.cursor()
         try:
             cursor.execute(query)
@@ -107,7 +109,7 @@ def _stage_has_duplicate_keys(
         finally:
             cursor.close()
 
-    if connection_type == "ch":
+    if backend == "ch":
         result = connection.query(query)
         return bool(result.result_rows)
 
@@ -123,6 +125,7 @@ def _stage_keys_overlap_target(
     target_table: str,
     key_columns: Sequence[str],
 ) -> bool:
+    backend = resolve_connection_backend(connection_type)
     join_condition = " AND ".join(
         _null_safe_key_equality(connection_type, "stage_src", "target_dst", column_name)
         for column_name in key_columns
@@ -134,7 +137,7 @@ def _stage_keys_overlap_target(
         "LIMIT 1"
     )
 
-    if connection_type in {"gp", "trino"}:
+    if backend in {"gp", "trino"}:
         cursor = connection.cursor()
         try:
             cursor.execute(query)
@@ -142,7 +145,7 @@ def _stage_keys_overlap_target(
         finally:
             cursor.close()
 
-    if connection_type == "ch":
+    if backend == "ch":
         result = connection.query(query)
         return bool(result.result_rows)
 

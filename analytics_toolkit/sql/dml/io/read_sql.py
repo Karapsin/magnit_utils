@@ -6,6 +6,7 @@ import pandas as pd
 import sqlparse
 
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
+from ...connection.config import get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
 from ..transfer.runtime.retry import rollback_quietly, run_with_retry
 from analytics_toolkit.general import time_print
@@ -59,7 +60,9 @@ def read_sql(
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
 ) -> pd.DataFrame:
-    normalized_type = connection_type.strip().lower()
+    config = get_connection_config(connection_type)
+    connection_key = config.connection_key
+    backend = config.backend
     sql = query.strip()
 
     if not sql:
@@ -75,27 +78,27 @@ def read_sql(
     sql = statements[0].rstrip(";").rstrip()
 
     def operation(attempt: int) -> pd.DataFrame:
-        connection = get_sql_connection(normalized_type)
+        connection = get_sql_connection(connection_key)
         try:
-            if normalized_type == "trino":
+            if backend == "trino":
                 return _read_trino(connection, sql, print_queries=print_queries)
-            if normalized_type == "gp":
+            if backend == "gp":
                 return _read_gp(connection, sql, print_queries=print_queries)
-            if normalized_type == "ch":
+            if backend == "ch":
                 return _read_ch(connection, sql, print_queries=print_queries)
             raise UnsupportedConnectionTypeError(
                 "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
             )
         except Exception:
-            if normalized_type == "gp":
+            if backend == "gp":
                 rollback_quietly(connection)
             raise
         finally:
-            time_print(f"Closing {normalized_type} connection")
+            time_print(f"Closing {connection_key} connection")
             connection.close()
 
     return run_with_retry(
-        operation_name=f"reading query on {normalized_type}",
+        operation_name=f"reading query on {connection_key} ({backend})",
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
         operation=operation,

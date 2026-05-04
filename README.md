@@ -26,17 +26,42 @@ from analytics_toolkit.excel import break_table, pivot_and_break_table
 
 ## Configuration
 
-Connection settings are read from environment variables. By default the package looks
-for a `.env` file starting from the current working directory and walking up through
-its parents.
+SQL connection settings are read from `.connections`. The package searches
+from the current working directory upward through parent directories. Each key is
+the public connection alias used by `analytics_toolkit.sql`; each value must
+include `type` as one of `gp`, `trino`, or `ch`.
 
-If `TRINO_USE_KEYCHAIN_CERTS=true`, the generated Trino CA bundle is written to:
+```json
+{
+  "gp": {
+    "type": "gp",
+    "host": "gp.example",
+    "port": 5432,
+    "user": "user",
+    "password": "password",
+    "database": "db"
+  },
+  "gp_sandbox": {
+    "type": "gp",
+    "host": "gp-sandbox.example",
+    "user": "user",
+    "password": "password",
+    "database": "sandbox"
+  }
+}
+```
 
-- `<project_root>/certs/trino-keychain-ca.pem` when a `.env` file is found
-- `<current_working_directory>/certs/trino-keychain-ca.pem` otherwise
+Legacy variables such as `GP_HOST`, `TRINO_HOST`, `CH_HOST`, `SQL_CONNECTIONS`,
+and `TRINO_INSERT_CHUNK_SIZE` are not read. Move connection settings into
+`.connections`; Trino insert chunk sizing is the Trino connection field
+`insert_chunk_size`.
 
-You can override the env file path with `MAGNIT_UTILS_ENV_FILE` and the state/output
-directory with `MAGNIT_UTILS_HOME`.
+If a Trino connection sets `use_keychain_certs=true`, the generated CA bundle is
+written to:
+
+- `<connections_file_directory>/certs/trino-<connection-key>-keychain-ca.pem`
+
+You can override the state/output directory with `MAGNIT_UTILS_HOME`.
 
 ## Package Layout
 

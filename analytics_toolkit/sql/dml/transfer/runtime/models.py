@@ -8,8 +8,10 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class TransferOptions:
-    from_db: str
-    to_db: str
+    from_db_key: str
+    from_db_backend: str
+    to_db_key: str
+    to_db_backend: str
     source_sql: str
     target_table: str
     replace_target_table: bool = True

@@ -14,9 +14,10 @@ def create_stage_state(
 ) -> TransferStageState:
     return TransferStageState(
         target_exists=table_exists(
-            options.to_db,
+            options.to_db_backend,
             connection_refs.target["connection"],
             options.target_table,
+            connection_key=options.to_db_key,
         )
     )
 
@@ -47,17 +48,19 @@ def initialize_stage_for_first_batch(
         "ch_order_by",
     )
     stage_state.stage_table = create_stage_table(
-        connection_type=options.to_db,
+        connection_type=options.to_db_backend,
         connection=connection_refs.target["connection"],
         target_table=options.target_table,
         batch=batch,
         gp_distributed_by_key=options.gp_distributed_by_key,
+        connection_key=options.to_db_key,
     )
     stage_state.stage_table_created = True
-    if options.to_db == "trino":
+    if options.to_db_backend == "trino":
         stage_state.stage_column_types = get_trino_table_column_types(
             connection_refs.target["connection"],
             stage_state.stage_table,
+            connection_key=options.to_db_key,
         )
 
 

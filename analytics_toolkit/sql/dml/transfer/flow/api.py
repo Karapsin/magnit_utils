@@ -2,17 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ....connection.errors import UnsupportedConnectionTypeError
+from ....connection.config import TrinoConfig, get_connection_config
 from analytics_toolkit.general import time_print
 from ...load.load_sql_table import AmbiguousTableLoadError
 from ...table.table_validation import normalize_key_columns
 from .attempt import run_transfer_attempt
 from ..runtime.models import TransferOptions
 from ..runtime.retry import run_with_retry
-
-
-SUPPORTED_CONNECTION_TYPES = {"trino", "gp", "ch"}
-
 
 def transfer_table(
     from_db: str,
@@ -56,11 +52,12 @@ def transfer_table(
     )
 
     time_print(
-        f"Starting table transfer from {options.from_db} to {options.to_db}: {options.target_table}"
+        f"Starting table transfer from {options.from_db_key} "
+        f"to {options.to_db_key}: {options.target_table}"
     )
 
     def transfer_operation(attempt: int) -> int:
-        if options.to_db == "gp":
+        if options.to_db_backend == "gp":
             return run_transfer_attempt(
                 options=options,
                 read_retry_cnt=options.retry_cnt,
@@ -76,14 +73,15 @@ def transfer_table(
                 )
             except AmbiguousTableLoadError as exc:
                 time_print(
-                    f"Discarding staged load for {options.to_db} and restarting from scratch: {exc!r}"
+                    f"Discarding staged load for {options.to_db_key} "
+                    f"and restarting from scratch: {exc!r}"
                 )
                 raise
 
         return run_with_retry(
             operation_name=(
-                f"restarting staged transfer from {options.from_db} "
-                f"to {options.to_db}: {options.target_table}"
+                f"restarting staged transfer from {options.from_db_key} "
+                f"to {options.to_db_key}: {options.target_table}"
             ),
             retry_cnt=options.retry_cnt,
             timeout_increment=options.timeout_increment,
@@ -94,8 +92,8 @@ def transfer_table(
     if options.replace_target_table:
         total_rows = run_with_retry(
             operation_name=(
-                f"restarting full transfer from {options.from_db} "
-                f"to {options.to_db}: {options.target_table}"
+                f"restarting full transfer from {options.from_db_key} "
+                f"to {options.to_db_key}: {options.target_table}"
             ),
             retry_cnt=options.full_retry_cnt,
             timeout_increment=options.full_timeout_increment,
@@ -105,7 +103,8 @@ def transfer_table(
         total_rows = transfer_operation(1)
 
     time_print(
-        f"Finished table transfer from {options.from_db} to {options.to_db}: {total_rows} row(s)"
+        f"Finished table transfer from {options.from_db_key} "
+        f"to {options.to_db_key}: {total_rows} row(s)"
     )
     return total_rows
 
@@ -130,9 +129,16 @@ def build_transfer_options(
     ch_cluster: str = "core",
     ch_sharding_key: str = "rand()",
 ) -> TransferOptions:
+    from_config = get_connection_config(from_db)
+    to_config = get_connection_config(to_db)
+    configured_trino_insert_chunk_size = (
+        to_config.insert_chunk_size if isinstance(to_config, TrinoConfig) else None
+    )
     options = TransferOptions(
-        from_db=normalize_connection_type(from_db),
-        to_db=normalize_connection_type(to_db),
+        from_db_key=from_config.connection_key,
+        from_db_backend=from_config.backend,
+        to_db_key=to_config.connection_key,
+        to_db_backend=to_config.backend,
         source_sql=from_sql.strip(),
         target_table=to_table.strip(),
         replace_target_table=replace_target_table,
@@ -143,7 +149,11 @@ def build_transfer_options(
         full_timeout_increment=full_timeout_increment,
         key_columns=normalize_key_columns(key_columns),
         gp_distributed_by_key=normalize_key_columns(gp_distributed_by_key),
-        trino_insert_chunk_size=trino_insert_chunk_size,
+        trino_insert_chunk_size=(
+            trino_insert_chunk_size
+            if trino_insert_chunk_size is not None
+            else configured_trino_insert_chunk_size
+        ),
         ch_partition_by=_normalize_ch_columns_or_expression(
             ch_partition_by,
             "ch_partition_by",
@@ -154,7 +164,7 @@ def build_transfer_options(
         ch_sharding_key=_normalize_ch_string(ch_sharding_key, "sharding_key"),
     )
 
-    if options.from_db == options.to_db:
+    if options.from_db_key == options.to_db_key:
         raise ValueError("from_db and to_db must be different.")
     if not options.source_sql:
         raise ValueError("from_sql must not be empty.")
@@ -170,22 +180,15 @@ def build_transfer_options(
         raise ValueError("full_retry_cnt must be at least 1.")
     if options.full_timeout_increment < 0:
         raise ValueError("full_timeout_increment must be non-negative.")
-    if options.gp_distributed_by_key is not None and options.to_db != "gp":
-        raise ValueError("gp_distributed_by_key can only be used when to_db is 'gp'.")
+    if options.gp_distributed_by_key is not None and options.to_db_backend != "gp":
+        raise ValueError(
+            "gp_distributed_by_key can only be used when to_db has type 'gp'."
+        )
     if options.trino_insert_chunk_size is not None and options.trino_insert_chunk_size <= 0:
         raise ValueError("trino_insert_chunk_size must be a positive integer.")
-    if options.to_db != "ch":
+    if options.to_db_backend != "ch":
         _validate_ch_options_not_used(options)
     return options
-
-
-def normalize_connection_type(connection_type: str) -> str:
-    normalized = connection_type.strip().lower()
-    if normalized not in SUPPORTED_CONNECTION_TYPES:
-        raise UnsupportedConnectionTypeError(
-            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
-        )
-    return normalized
 
 
 def _normalize_ch_columns_or_expression(
@@ -214,12 +217,12 @@ def _normalize_ch_string(value: str, option_name: str) -> str:
 
 def _validate_ch_options_not_used(options: TransferOptions) -> None:
     if options.ch_partition_by is not None:
-        raise ValueError("ch_partition_by can only be used when to_db is 'ch'.")
+        raise ValueError("ch_partition_by can only be used when to_db has type 'ch'.")
     if options.ch_order_by is not None:
-        raise ValueError("ch_order_by can only be used when to_db is 'ch'.")
+        raise ValueError("ch_order_by can only be used when to_db has type 'ch'.")
     if options.ch_engine != "ReplicatedMergeTree":
-        raise ValueError("ch_engine can only be used when to_db is 'ch'.")
+        raise ValueError("ch_engine can only be used when to_db has type 'ch'.")
     if options.ch_cluster != "core":
-        raise ValueError("ch_cluster can only be used when to_db is 'ch'.")
+        raise ValueError("ch_cluster can only be used when to_db has type 'ch'.")
     if options.ch_sharding_key != "rand()":
-        raise ValueError("sharding_key can only be used when to_db is 'ch'.")
+        raise ValueError("sharding_key can only be used when to_db has type 'ch'.")

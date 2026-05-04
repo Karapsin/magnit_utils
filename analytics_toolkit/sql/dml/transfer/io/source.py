@@ -11,16 +11,18 @@ from ..runtime.retry import replace_connection, rollback_quietly, run_with_retry
 
 
 def iter_source_batches(
-    connection_type: str,
+    connection_key: str,
+    connection_backend: str,
     connection_ref: dict[str, Any],
     query: str,
     batch_size: int,
     retry_cnt: int,
     timeout_increment: int | float,
 ) -> Iterator[pd.DataFrame]:
-    if connection_type in {"gp", "trino"}:
+    if connection_backend in {"gp", "trino"}:
         yield from _iter_dbapi_batches(
-            connection_type,
+            connection_key,
+            connection_backend,
             connection_ref,
             query,
             batch_size,
@@ -28,8 +30,9 @@ def iter_source_batches(
             timeout_increment=timeout_increment,
         )
         return
-    if connection_type == "ch":
+    if connection_backend == "ch":
         yield from _iter_clickhouse_batches(
+            connection_key,
             connection_ref,
             query,
             batch_size,
@@ -44,7 +47,8 @@ def iter_source_batches(
 
 
 def _iter_dbapi_batches(
-    connection_type: str,
+    connection_key: str,
+    connection_backend: str,
     connection_ref: dict[str, Any],
     query: str,
     batch_size: int,
@@ -52,7 +56,8 @@ def _iter_dbapi_batches(
     timeout_increment: int | float,
 ) -> Iterator[pd.DataFrame]:
     cursor, columns = _start_dbapi_query_with_retry(
-        connection_type,
+        connection_key,
+        connection_backend,
         connection_ref,
         query,
         retry_cnt=retry_cnt,
@@ -72,6 +77,7 @@ def _iter_dbapi_batches(
 
 
 def _iter_clickhouse_batches(
+    connection_key: str,
     connection_ref: dict[str, Any],
     query: str,
     batch_size: int,
@@ -84,6 +90,7 @@ def _iter_clickhouse_batches(
 
     try:
         context_manager, stream_iterator, first_block = _start_clickhouse_stream_with_retry(
+            connection_key,
             connection_ref,
             query,
             retry_cnt=retry_cnt,
@@ -124,7 +131,8 @@ def _iter_clickhouse_batches(
 
 
 def _start_dbapi_query_with_retry(
-    connection_type: str,
+    connection_key: str,
+    connection_backend: str,
     connection_ref: dict[str, Any],
     query: str,
     retry_cnt: int,
@@ -138,13 +146,13 @@ def _start_dbapi_query_with_retry(
             return cursor, columns
         except Exception:
             cursor.close()
-            if connection_type == "gp":
+            if connection_backend == "gp":
                 rollback_quietly(connection_ref["connection"])
-            replace_connection(connection_type, connection_ref)
+            replace_connection(connection_key, connection_ref)
             raise
 
     return run_with_retry(
-        operation_name=f"starting source query on {connection_type}",
+        operation_name=f"starting source query on {connection_key} ({connection_backend})",
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
         operation=operation,
@@ -152,6 +160,7 @@ def _start_dbapi_query_with_retry(
 
 
 def _start_clickhouse_stream_with_retry(
+    connection_key: str,
     connection_ref: dict[str, Any],
     query: str,
     retry_cnt: int,
@@ -172,11 +181,11 @@ def _start_clickhouse_stream_with_retry(
                 return context_manager, iterator, block
         except Exception:
             context_manager.__exit__(None, None, None)
-            replace_connection("ch", connection_ref)
+            replace_connection(connection_key, connection_ref)
             raise
 
     return run_with_retry(
-        operation_name="starting source query on ch",
+        operation_name=f"starting source query on {connection_key} (ch)",
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
         operation=operation,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator, Sequence
 from decimal import Decimal
 from itertools import islice
@@ -10,7 +9,12 @@ import pandas as pd
 from psycopg2.extras import execute_values
 
 from ...ddl.create_sql_table import column_list_sql
-from ...connection.errors import UnsupportedConnectionTypeError
+from ...connection.config import (
+    TrinoConfig,
+    get_connection_config,
+    resolve_connection_backend,
+)
+from ...connection.errors import SqlConfigError, UnsupportedConnectionTypeError
 from analytics_toolkit.general import time_print
 
 
@@ -32,28 +36,30 @@ def insert_table_batch(
     target_column_types: dict[str, str] | None = None,
     trino_insert_chunk_size: int | None = None,
 ) -> int:
-    normalized_batch = normalize_batch(batch) if connection_type != "trino" else batch
+    backend = resolve_connection_backend(connection_type)
+    normalized_batch = normalize_batch(batch) if backend != "trino" else batch
 
     def operation(attempt: int) -> int:
         connection = connection_ref["connection"]
         try:
-            if connection_type == "gp":
+            if backend == "gp":
                 _insert_gp_batch(connection, table_name, normalized_batch)
                 return len(normalized_batch)
-            if connection_type == "trino":
+            if backend == "trino":
                 _insert_trino_batch(
                     connection,
                     table_name,
                     normalized_batch,
                     target_column_types=target_column_types,
                     trino_insert_chunk_size=trino_insert_chunk_size,
+                    connection_type=connection_type,
                 )
                 return len(normalized_batch)
-            if connection_type == "ch":
+            if backend == "ch":
                 _insert_ch_batch(connection, table_name, normalized_batch)
                 return len(normalized_batch)
         except Exception as exc:
-            if connection_type == "gp":
+            if backend == "gp":
                 if getattr(connection, "closed", 0):
                     raise
             else:
@@ -62,7 +68,8 @@ def insert_table_batch(
                     "the current stage table will be discarded and reloaded from scratch."
                 )
                 time_print(
-                    f"Original {connection_type} insert error for {table_name}: {type(exc).__name__}: {exc!r}"
+                    f"Original {connection_type} insert error for {table_name}: "
+                    f"{type(exc).__name__}: {exc!r}"
                 )
                 raise AmbiguousTableLoadError(
                     f"Ambiguous stage insert outcome on {connection_type} for {table_name}"
@@ -111,11 +118,15 @@ def _insert_trino_batch(
     batch: pd.DataFrame,
     target_column_types: dict[str, str] | None = None,
     trino_insert_chunk_size: int | None = None,
+    connection_type: str = "trino",
 ) -> None:
     column_list = column_list_sql(batch.columns, "trino")
     column_count = len(batch.columns)
     row_placeholders = f"({', '.join('?' for _ in range(column_count))})"
-    chunk_size = _get_trino_insert_chunk_size(trino_insert_chunk_size)
+    chunk_size = _get_trino_insert_chunk_size(
+        trino_insert_chunk_size,
+        connection_type,
+    )
     cursor = connection.cursor()
     try:
         row_iterator = _iter_trino_rows(batch, target_column_types)
@@ -252,24 +263,22 @@ def _trino_literal(value: Any, target_type: str | None) -> str:
     return f"'{escaped}'"
 
 
-def _get_trino_insert_chunk_size(explicit_value: int | None) -> int:
+def _get_trino_insert_chunk_size(
+    explicit_value: int | None,
+    connection_type: str = "trino",
+) -> int:
     if explicit_value is not None:
         if explicit_value <= 0:
             raise ValueError("trino_insert_chunk_size must be a positive integer.")
         return explicit_value
 
-    raw_value = os.getenv("TRINO_INSERT_CHUNK_SIZE", "").strip()
-    if not raw_value:
-        return DEFAULT_TRINO_INSERT_CHUNK_SIZE
-
     try:
-        chunk_size = int(raw_value)
-    except ValueError as exc:
-        raise ValueError("TRINO_INSERT_CHUNK_SIZE must be a positive integer.") from exc
-
-    if chunk_size <= 0:
-        raise ValueError("TRINO_INSERT_CHUNK_SIZE must be a positive integer.")
-    return chunk_size
+        config = get_connection_config(connection_type)
+    except (SqlConfigError, UnsupportedConnectionTypeError):
+        return DEFAULT_TRINO_INSERT_CHUNK_SIZE
+    if isinstance(config, TrinoConfig) and config.insert_chunk_size is not None:
+        return config.insert_chunk_size
+    return DEFAULT_TRINO_INSERT_CHUNK_SIZE
 
 
 def _is_null_like(value: Any) -> bool:

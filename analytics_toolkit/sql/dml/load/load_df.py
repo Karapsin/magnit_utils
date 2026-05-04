@@ -6,7 +6,7 @@ from typing import Any
 import pandas as pd
 
 from ...ddl.create_sql_table import create_sql_table
-from ...connection.errors import UnsupportedConnectionTypeError
+from ...connection.config import TrinoConfig, get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
 from ..transfer.runtime.retry import rollback_quietly, run_with_retry
 from analytics_toolkit.general import time_print
@@ -66,21 +66,23 @@ def load_df(
     )
 
     def operation(attempt: int) -> int:
-        connection_ref = {"connection": get_sql_connection(options.connection_type)}
+        connection_ref = {"connection": get_sql_connection(options.connection_key)}
         state: LoadState | None = None
         try:
             state = LoadState(
                 target_exists=table_exists(
-                    options.connection_type,
+                    options.connection_backend,
                     connection_ref["connection"],
                     options.destination_table,
+                    connection_key=options.connection_key,
                 )
             )
 
             if df.empty:
                 if options.append and state.target_exists:
                     time_print(
-                        f"Skipping empty DataFrame append into {options.connection_type}.{options.destination_table}"
+                        f"Skipping empty DataFrame append into "
+                        f"{options.connection_key}.{options.destination_table}"
                     )
                     return 0
                 raise ValueError("Cannot create or replace a table from an empty DataFrame.")
@@ -102,9 +104,10 @@ def load_df(
             _validate_dataframe_key_uniqueness(df, options.key_columns)
 
             if not options.append:
-                if options.connection_type == "ch":
+                if options.connection_backend == "ch":
                     time_print(
-                        f"Dropping existing ClickHouse distributed table pair {options.destination_table}"
+                        "Dropping existing ClickHouse distributed table pair "
+                        f"{options.destination_table}"
                     )
                     drop_ch_distributed_table_pair(
                         connection_ref["connection"],
@@ -114,18 +117,19 @@ def load_df(
                     state.target_exists = False
                 elif state.target_exists:
                     time_print(
-                        f"Dropping existing table {options.destination_table} on {options.connection_type}"
+                        f"Dropping existing table {options.destination_table} "
+                        f"on {options.connection_key}"
                     )
                     drop_table(
-                        options.connection_type,
+                        options.connection_backend,
                         connection_ref["connection"],
                         options.destination_table,
                     )
                     state.target_exists = False
 
-            if options.connection_type == "ch":
+            if options.connection_backend == "ch":
                 create_sql_table(
-                    options.connection_type,
+                    options.connection_backend,
                     connection_ref["connection"],
                     options.destination_table,
                     df,
@@ -140,17 +144,18 @@ def load_df(
                 state.target_exists = True
             elif not state.target_exists:
                 create_sql_table(
-                    options.connection_type,
+                    options.connection_backend,
                     connection_ref["connection"],
                     options.destination_table,
                     df,
                     gp_distributed_by_key=options.gp_distributed_by_key,
                 )
 
-            if options.connection_type == "trino":
+            if options.connection_backend == "trino":
                 state.target_column_types = get_trino_table_column_types(
                     connection_ref["connection"],
                     options.destination_table,
+                    connection_key=options.connection_key,
                 )
 
             inserted_rows = _load_dataframe(
@@ -161,16 +166,18 @@ def load_df(
             )
 
             analyze_table(
-                connection_type=options.connection_type,
+                connection_type=options.connection_backend,
                 connection=connection_ref["connection"],
                 table_name=options.destination_table,
             )
             time_print(
-                f"Finished loading DataFrame into {options.connection_type}.{options.destination_table}: {inserted_rows} row(s)"
+                f"Finished loading DataFrame into "
+                f"{options.connection_key}.{options.destination_table}: "
+                f"{inserted_rows} row(s)"
             )
             return inserted_rows
         except Exception:
-            if options.connection_type == "gp":
+            if options.connection_backend == "gp":
                 rollback_quietly(connection_ref["connection"])
             raise
         finally:
@@ -178,7 +185,7 @@ def load_df(
 
     return run_with_retry(
         operation_name=(
-            f"loading DataFrame into {options.connection_type}.{options.destination_table}"
+            f"loading DataFrame into {options.connection_key}.{options.destination_table}"
         ),
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
@@ -199,13 +206,22 @@ def _build_load_options(
     ch_cluster: str = "core",
     ch_sharding_key: str = "rand()",
 ) -> LoadOptions:
+    config = get_connection_config(connection_type)
+    configured_trino_insert_chunk_size = (
+        config.insert_chunk_size if isinstance(config, TrinoConfig) else None
+    )
     options = LoadOptions(
-        connection_type=connection_type.strip().lower(),
+        connection_key=config.connection_key,
+        connection_backend=config.backend,
         destination_table=destination_table.strip(),
         append=append,
         gp_distributed_by_key=_normalize_gp_distributed_by_key(gp_distributed_by_key),
         key_columns=normalize_key_columns(key_columns),
-        trino_insert_chunk_size=trino_insert_chunk_size,
+        trino_insert_chunk_size=(
+            trino_insert_chunk_size
+            if trino_insert_chunk_size is not None
+            else configured_trino_insert_chunk_size
+        ),
         ch_partition_by=_normalize_ch_columns_or_expression(
             ch_partition_by,
             "ch_partition_by",
@@ -216,17 +232,15 @@ def _build_load_options(
         ch_sharding_key=_normalize_ch_string(ch_sharding_key, "sharding_key"),
     )
 
-    if options.connection_type not in {"trino", "gp", "ch"}:
-        raise UnsupportedConnectionTypeError(
-            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
-        )
     if not options.destination_table:
         raise ValueError("destination_table must not be empty.")
-    if options.gp_distributed_by_key and options.connection_type != "gp":
-        raise ValueError("gp_distributed_by_key can only be used when connection_type='gp'.")
+    if options.gp_distributed_by_key and options.connection_backend != "gp":
+        raise ValueError(
+            "gp_distributed_by_key can only be used when connection_type has type 'gp'."
+        )
     if options.trino_insert_chunk_size is not None and options.trino_insert_chunk_size <= 0:
         raise ValueError("trino_insert_chunk_size must be a positive integer.")
-    if options.connection_type != "ch":
+    if options.connection_backend != "ch":
         _validate_ch_options_not_used(options)
     return options
 
@@ -239,14 +253,15 @@ def _load_dataframe(
 ) -> int:
     if options.append and state.target_exists and options.key_columns:
         state.overlap_stage_table = create_stage_table(
-            connection_type=options.connection_type,
+            connection_type=options.connection_backend,
             connection=connection_ref["connection"],
             target_table=options.destination_table,
             batch=df,
             gp_distributed_by_key=options.gp_distributed_by_key,
+            connection_key=options.connection_key,
         )
         insert_table_batch(
-            options.connection_type,
+            options.connection_backend,
             connection_ref,
             state.overlap_stage_table,
             df,
@@ -257,7 +272,7 @@ def _load_dataframe(
             trino_insert_chunk_size=options.trino_insert_chunk_size,
         )
         validate_stage_target_key_overlap(
-            connection_type=options.connection_type,
+            connection_type=options.connection_backend,
             connection=connection_ref["connection"],
             stage_table=state.overlap_stage_table,
             target_table=options.destination_table,
@@ -266,7 +281,7 @@ def _load_dataframe(
             replace_target_table=False,
         )
         insert_from_table(
-            options.connection_type,
+            options.connection_backend,
             connection_ref["connection"],
             options.destination_table,
             state.overlap_stage_table,
@@ -274,7 +289,7 @@ def _load_dataframe(
         return len(df)
 
     return insert_table_batch(
-        options.connection_type,
+        options.connection_backend,
         connection_ref,
         options.destination_table,
         df,
@@ -294,7 +309,7 @@ def _cleanup_load(
     if state is not None and state.overlap_stage_table is not None:
         try:
             drop_table(
-                options.connection_type,
+                options.connection_backend,
                 connection_ref["connection"],
                 state.overlap_stage_table,
             )
@@ -302,7 +317,7 @@ def _cleanup_load(
             time_print(
                 f"Failed to drop temporary load_df stage table {state.overlap_stage_table}"
             )
-    time_print(f"Closing {options.connection_type} connection")
+    time_print(f"Closing {options.connection_key} connection")
     connection_ref["connection"].close()
 
 
@@ -348,15 +363,25 @@ def _normalize_ch_string(value: str, option_name: str) -> str:
 
 def _validate_ch_options_not_used(options: LoadOptions) -> None:
     if options.ch_partition_by is not None:
-        raise ValueError("ch_partition_by can only be used when connection_type='ch'.")
+        raise ValueError(
+            "ch_partition_by can only be used when connection_type has type 'ch'."
+        )
     if options.ch_order_by is not None:
-        raise ValueError("ch_order_by can only be used when connection_type='ch'.")
+        raise ValueError(
+            "ch_order_by can only be used when connection_type has type 'ch'."
+        )
     if options.ch_engine != "ReplicatedMergeTree":
-        raise ValueError("ch_engine can only be used when connection_type='ch'.")
+        raise ValueError(
+            "ch_engine can only be used when connection_type has type 'ch'."
+        )
     if options.ch_cluster != "core":
-        raise ValueError("ch_cluster can only be used when connection_type='ch'.")
+        raise ValueError(
+            "ch_cluster can only be used when connection_type has type 'ch'."
+        )
     if options.ch_sharding_key != "rand()":
-        raise ValueError("sharding_key can only be used when connection_type='ch'.")
+        raise ValueError(
+            "sharding_key can only be used when connection_type has type 'ch'."
+        )
 
 
 def _validate_ch_columns_in_dataframe(

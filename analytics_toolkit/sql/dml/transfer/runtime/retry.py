@@ -128,12 +128,12 @@ def rollback_quietly(connection: Any) -> None:
         return
 
 
-def replace_connection(connection_type: str, connection_ref: dict[str, Any]) -> None:
+def replace_connection(connection_key: str, connection_ref: dict[str, Any]) -> None:
     try:
         connection_ref["connection"].close()
     except Exception:
         pass
-    connection_ref["connection"] = get_sql_connection(connection_type)
+    connection_ref["connection"] = get_sql_connection(connection_key)
 
 
 def close_connection_ref(

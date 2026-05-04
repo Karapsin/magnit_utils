@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.so
 .env
+.connections
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

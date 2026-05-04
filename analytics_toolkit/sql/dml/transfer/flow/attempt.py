@@ -16,8 +16,8 @@ def run_transfer_attempt(
     insert_retry_cnt: int,
 ) -> int:
     connection_refs = TransferConnectionRefs(
-        source={"connection": get_sql_connection(options.from_db)},
-        target={"connection": get_sql_connection(options.to_db)},
+        source={"connection": get_sql_connection(options.from_db_key)},
+        target={"connection": get_sql_connection(options.to_db_key)},
     )
     total_rows = 0
     transfer_error: Exception | None = None
@@ -51,8 +51,8 @@ def run_transfer_attempt(
         except Exception as exc:
             cleanup_error = exc
         finally:
-            close_connection_ref(connection_refs.source, options.from_db, "source")
-            close_connection_ref(connection_refs.target, options.to_db, "target")
+            close_connection_ref(connection_refs.source, options.from_db_key, "source")
+            close_connection_ref(connection_refs.target, options.to_db_key, "target")
 
     if transfer_error is not None:
         if cleanup_error is not None:
@@ -74,7 +74,8 @@ def load_stage_batches(
 ) -> int:
     total_rows = 0
     for batch in iter_source_batches(
-        options.from_db,
+        options.from_db_key,
+        options.from_db_backend,
         connection_refs.source,
         options.source_sql,
         options.batch_size,
@@ -93,7 +94,7 @@ def load_stage_batches(
             )
 
         inserted_rows = insert_table_batch(
-            options.to_db,
+            options.to_db_backend,
             connection_refs.target,
             stage_state.stage_table,
             batch,
@@ -105,6 +106,6 @@ def load_stage_batches(
         )
         total_rows += inserted_rows
         time_print(
-            f"Transferred batch of {inserted_rows} row(s) to {options.to_db}.{stage_state.stage_table}"
+            f"Transferred batch of {inserted_rows} row(s) to {options.to_db_key}.{stage_state.stage_table}"
         )
     return total_rows

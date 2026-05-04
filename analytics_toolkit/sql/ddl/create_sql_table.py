@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 import pandas as pd
 from sqlglot import exp, parse_one
 
+from ..connection.config import resolve_connection_backend
 from ..connection.errors import UnsupportedConnectionTypeError
 from analytics_toolkit.general import time_print
 
@@ -24,9 +26,10 @@ def create_sql_table(
     ch_sharding_key: str = "rand()",
     ch_distributed_table: bool = False,
 ) -> None:
+    backend = resolve_connection_backend(connection_type)
     time_print(f"Creating target table {table_name} on {connection_type}")
     create_sqls = build_create_table_sqls(
-        connection_type,
+        backend,
         table_name,
         batch,
         gp_distributed_by_key=gp_distributed_by_key,
@@ -38,7 +41,7 @@ def create_sql_table(
         ch_distributed_table=ch_distributed_table,
     )
 
-    if connection_type == "gp":
+    if backend == "gp":
         cursor = connection.cursor()
         try:
             for create_sql in create_sqls:
@@ -51,7 +54,7 @@ def create_sql_table(
         finally:
             cursor.close()
 
-    if connection_type == "trino":
+    if backend == "trino":
         cursor = connection.cursor()
         try:
             for create_sql in create_sqls:
@@ -60,9 +63,11 @@ def create_sql_table(
         finally:
             cursor.close()
 
-    if connection_type == "ch":
+    if backend == "ch":
         for create_sql in create_sqls:
-            connection.command(create_sql)
+            _execute_ch_command(connection, create_sql)
+        if ch_distributed_table:
+            _wait_for_ch_table(connection, table_name)
         return
 
     raise UnsupportedConnectionTypeError(
@@ -110,23 +115,24 @@ def build_create_table_sqls(
     ch_sharding_key: str = "rand()",
     ch_distributed_table: bool = False,
 ) -> list[str]:
+    backend = resolve_connection_backend(connection_type)
     column_defs = []
     for column_name in batch.columns:
         series = batch[column_name]
-        if connection_type == "gp":
+        if backend == "gp":
             db_type = _infer_gp_type(series)
             column_defs.append(
-                f'{quote_identifier(column_name, connection_type)} {db_type}'
+                f'{quote_identifier(column_name, backend)} {db_type}'
             )
-        elif connection_type == "trino":
+        elif backend == "trino":
             db_type = _infer_trino_type(series)
             column_defs.append(
-                f'{quote_identifier(column_name, connection_type)} {db_type}'
+                f'{quote_identifier(column_name, backend)} {db_type}'
             )
-        elif connection_type == "ch":
+        elif backend == "ch":
             db_type = _infer_ch_type(series)
             column_defs.append(
-                f"{quote_identifier(column_name, connection_type)} {db_type}"
+                f"{quote_identifier(column_name, backend)} {db_type}"
             )
         else:
             raise UnsupportedConnectionTypeError(
@@ -134,7 +140,7 @@ def build_create_table_sqls(
             )
 
     joined_columns = ", ".join(column_defs)
-    if connection_type == "ch":
+    if backend == "ch":
         if ch_distributed_table:
             return build_ch_distributed_create_table_sqls(
                 table_name=table_name,
@@ -149,18 +155,18 @@ def build_create_table_sqls(
             f"CREATE TABLE {table_name} ({joined_columns}) "
             "ENGINE = MergeTree ORDER BY tuple()"
         ]
-    if connection_type == "trino":
+    if backend == "trino":
         return [
             f"CREATE TABLE {table_name} ({joined_columns}) "
             "WITH (format = 'PARQUET', object_store_layout_enabled = true)"
         ]
-    if connection_type == "gp":
+    if backend == "gp":
         storage_sql = (
             "WITH (appendoptimized = TRUE, compresstype = zstd, compresslevel = 2)"
         )
         if gp_distributed_by_key:
             distribution_sql = (
-                f"DISTRIBUTED BY ({column_list_sql(gp_distributed_by_key, connection_type)})"
+                f"DISTRIBUTED BY ({column_list_sql(gp_distributed_by_key, backend)})"
             )
         else:
             distribution_sql = "DISTRIBUTED RANDOMLY"
@@ -208,7 +214,17 @@ def build_ch_distributed_create_table_sqls(
         f"    {sharding_key}\n"
         ")"
     )
-    return [shard_sql, distributed_sql]
+    local_distributed_sql = (
+        f"CREATE TABLE IF NOT EXISTS {table_name}\n"
+        f"({joined_columns})\n"
+        "ENGINE = Distributed(\n"
+        f"    {_sql_string_literal(cluster_name)},\n"
+        f"    {database_name},\n"
+        f"    {_sql_string_literal(shard_relation_name)},\n"
+        f"    {sharding_key}\n"
+        ")"
+    )
+    return [shard_sql, distributed_sql, local_distributed_sql]
 
 
 def build_ch_shard_table_name(table_name: str) -> str:
@@ -225,13 +241,15 @@ def split_ch_table_name_for_distributed_engine(table_name: str) -> tuple[str, st
 
 
 def column_list_sql(columns: Sequence[str], connection_type: str) -> str:
+    backend = resolve_connection_backend(connection_type)
     return ", ".join(
-        quote_identifier(column_name, connection_type) for column_name in columns
+        quote_identifier(column_name, backend) for column_name in columns
     )
 
 
 def quote_identifier(identifier: str, connection_type: str) -> str:
-    if connection_type == "ch":
+    backend = resolve_connection_backend(connection_type)
+    if backend == "ch":
         escaped = identifier.replace("`", "``")
         return f"`{escaped}`"
 
@@ -306,6 +324,41 @@ def _normalize_non_empty_string(value: str, option_name: str) -> str:
 
 def _sql_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _execute_ch_command(connection: Any, sql: str) -> None:
+    if "ON CLUSTER" not in sql:
+        connection.command(sql)
+        return
+
+    try:
+        connection.command(
+            sql,
+            settings={
+                "distributed_ddl_task_timeout": 300,
+            },
+        )
+    except TypeError:
+        connection.command(sql)
+
+
+def _wait_for_ch_table(
+    connection: Any,
+    table_name: str,
+    timeout_seconds: int = 60,
+    poll_interval_seconds: float = 1,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        result = connection.query(f"EXISTS TABLE {table_name}")
+        if result.result_rows and result.result_rows[0][0]:
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"ClickHouse table {table_name} was not visible after "
+                f"{timeout_seconds} second(s)."
+            )
+        time.sleep(poll_interval_seconds)
 
 
 def _infer_gp_type(series: pd.Series) -> str:

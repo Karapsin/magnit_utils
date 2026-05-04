@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "analytics_toolkit"
-version = "0.4.0.1"
+version = "0.5.0.0"
 description = "Shared Python utilities for SQL, Excel, and date helpers."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,7 +20,6 @@ dependencies = [
   "orjson==3.11.5",
   "pandas==2.3.3",
   "psycopg2-binary==2.9.11",
-  "python-dotenv==1.1.1",
   "python-dateutil==2.9.0.post0",
   "pytz==2026.1.post1",
   "requests==2.32.5",

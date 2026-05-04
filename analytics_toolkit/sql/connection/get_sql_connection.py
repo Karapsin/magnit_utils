@@ -6,18 +6,20 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable
 
-from dotenv import load_dotenv
-
-from .config import ChConfig, GpConfig, TrinoConfig, get_connection_config
+from .config import (
+    ChConfig,
+    GpConfig,
+    TrinoConfig,
+    get_connection_config,
+    get_connections_file_path,
+)
 from .errors import SqlConfigError, UnsupportedConnectionTypeError
 from analytics_toolkit.general import time_print
 
 
-def get_sql_connection(connection_type: str) -> Any:
-    _load_dotenv()
-    normalized_type = connection_type.strip().lower()
-    config = get_connection_config(normalized_type)
-    time_print(f"Opening {normalized_type} connection")
+def get_sql_connection(connection_key: str) -> Any:
+    config = get_connection_config(connection_key)
+    time_print(f"Opening {config.connection_key} ({config.backend}) connection")
 
     if isinstance(config, TrinoConfig):
         return _get_trino_connection(config)
@@ -31,15 +33,16 @@ def get_sql_connection(connection_type: str) -> Any:
     )
 
 
-def with_sql_connection(connection_type: str) -> Callable[..., Any]:
+def with_sql_connection(connection_key: str) -> Callable[..., Any]:
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            connection = get_sql_connection(connection_type)
+            config = get_connection_config(connection_key)
+            connection = get_sql_connection(config.connection_key)
             try:
                 return func(connection, *args, **kwargs)
             finally:
-                time_print(f"Closing {connection_type} connection")
+                time_print(f"Closing {config.connection_key} connection")
                 connection.close()
 
         return wrapper
@@ -58,7 +61,7 @@ def _get_trino_connection(config: TrinoConfig) -> Any:
 
     verify_value = config.verify_value
     if config.use_keychain_certs:
-        verify_value = str(_build_trino_keychain_bundle())
+        verify_value = str(_build_trino_keychain_bundle(config))
 
     if config.auth_mode == "oauth2":
         auth = trino.auth.OAuth2Authentication()
@@ -66,7 +69,8 @@ def _get_trino_connection(config: TrinoConfig) -> Any:
         auth = BasicAuthentication(config.user, config.password) if config.password else None
     else:
         raise SqlConfigError(
-            "Unsupported TRINO_AUTH_MODE. Expected 'basic' or 'oauth2'."
+            f"SQL connection '{config.connection_key}' has unsupported auth_mode. "
+            "Expected 'basic' or 'oauth2'."
         )
 
     connect_kwargs = {
@@ -133,18 +137,23 @@ def _parse_verify_value(value: str) -> bool | str:
     return normalized
 
 
-def _build_trino_keychain_bundle() -> Path:
+def _build_trino_keychain_bundle(config: TrinoConfig) -> Path:
+    if not config.keychain_cert_names:
+        raise SqlConfigError(
+            f"SQL connection '{config.connection_key}' enables keychain certs "
+            "but does not define keychain_cert_names."
+        )
+
     certs_dir = _state_dir() / "certs"
     certs_dir.mkdir(parents=True, exist_ok=True)
-    bundle_path = certs_dir / "trino-keychain-ca.pem"
+    bundle_path = certs_dir / f"trino-{_safe_file_key(config.connection_key)}-keychain-ca.pem"
     keychains = [
         str(Path.home() / "Library/Keychains/login.keychain-db"),
         "/Library/Keychains/System.keychain",
     ]
-    cert_names = _trino_keychain_cert_names()
 
     certificates: list[str] = []
-    for cert_name in cert_names:
+    for cert_name in config.keychain_cert_names:
         certificate = _export_keychain_certificate(cert_name, keychains)
         if not certificate:
             raise SqlConfigError(
@@ -182,53 +191,19 @@ def _export_keychain_certificate(cert_name: str, keychains: list[str]) -> str:
     return ""
 
 
-def _load_dotenv() -> None:
-    env_path = _dotenv_path()
-    if env_path is not None:
-        load_dotenv(dotenv_path=env_path, override=True)
-
-
-def _trino_keychain_cert_names() -> list[str]:
-    raw_value = os.getenv("TRINO_KEYCHAIN_CERT_NAMES", "")
-    cert_names = [name.strip() for name in raw_value.split("|") if name.strip()]
-    if not cert_names:
-        raise SqlConfigError(
-            "Missing required environment variable: TRINO_KEYCHAIN_CERT_NAMES"
-        )
-    return cert_names
-
-
-def _dotenv_path() -> Path | None:
-    env_override = os.getenv("MAGNIT_UTILS_ENV_FILE")
-    if env_override:
-        env_path = Path(env_override).expanduser()
-        if env_path.exists():
-            return env_path
-
-    current_dir = Path.cwd().resolve()
-    for directory in (current_dir, *current_dir.parents):
-        env_path = directory / ".env"
-        if env_path.exists():
-            return env_path
-
-    package_env = _package_root_dir() / ".env"
-    if package_env.exists():
-        return package_env
-
-    return None
-
-
 def _state_dir() -> Path:
     state_override = os.getenv("MAGNIT_UTILS_HOME")
     if state_override:
         return Path(state_override).expanduser()
 
-    env_path = _dotenv_path()
-    if env_path is not None:
-        return env_path.parent
+    try:
+        return get_connections_file_path().parent
+    except SqlConfigError:
+        return Path.cwd().resolve()
 
-    return Path.cwd().resolve()
 
-
-def _package_root_dir() -> Path:
-    return Path(__file__).resolve().parents[2]
+def _safe_file_key(connection_key: str) -> str:
+    return "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in connection_key
+    )

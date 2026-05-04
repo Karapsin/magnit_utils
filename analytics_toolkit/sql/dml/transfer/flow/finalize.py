@@ -31,13 +31,13 @@ def finalize_loaded_stage(
         raise RuntimeError("Expected stage table to be initialized.")
 
     validate_stage_uniqueness(
-        connection_type=options.to_db,
+        connection_type=options.to_db_backend,
         connection=connection_refs.target["connection"],
         stage_table=stage_state.stage_table,
         key_columns=options.key_columns,
     )
     validate_stage_target_key_overlap(
-        connection_type=options.to_db,
+        connection_type=options.to_db_backend,
         connection=connection_refs.target["connection"],
         stage_table=stage_state.stage_table,
         target_table=options.target_table,
@@ -46,7 +46,7 @@ def finalize_loaded_stage(
         replace_target_table=options.replace_target_table,
     )
     finalize_stage_table(
-        options.to_db,
+        options.to_db_backend,
         connection_refs.target["connection"],
         stage_table=stage_state.stage_table,
         target_table=options.target_table,
@@ -61,7 +61,7 @@ def finalize_loaded_stage(
         ch_sharding_key=options.ch_sharding_key,
     )
     analyze_table(
-        connection_type=options.to_db,
+        connection_type=options.to_db_backend,
         connection=connection_refs.target["connection"],
         table_name=options.target_table,
     )
@@ -75,7 +75,7 @@ def finalize_empty_transfer(
     if options.replace_target_table:
         if not stage_state.target_exists:
             raise ValueError("Cannot create target table from an empty result set.")
-        if options.to_db == "ch":
+        if options.to_db_backend == "ch":
             clear_ch_distributed_table_data(
                 connection_refs.target["connection"],
                 options.target_table,
@@ -83,7 +83,7 @@ def finalize_empty_transfer(
             )
             return
         clear_target_table(
-            options.to_db,
+            options.to_db_backend,
             connection_refs.target["connection"],
             options.target_table,
         )
@@ -103,7 +103,8 @@ def cleanup_stage(
         return
 
     drop_table_with_retry(
-        options.to_db,
+        options.to_db_backend,
+        options.to_db_key,
         connection_refs.target,
         stage_state.stage_table,
         retry_fn=run_with_retry,

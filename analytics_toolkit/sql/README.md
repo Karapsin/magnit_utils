@@ -38,7 +38,7 @@ from the beginning with a fresh connection.
 For Trino targets, `load_df` and `transfer_table` also accept
 `trino_insert_chunk_size` to control how many rows are sent in each
 parameterized multi-row insert statement. If omitted, the package falls back to
-`TRINO_INSERT_CHUNK_SIZE` from the environment, then to the internal default.
+the target Trino connection's `insert_chunk_size`, then to the internal default.
 
 For ClickHouse targets, `load_df` and `transfer_table` create a local
 `<target>_shard` table first and then create the requested target as a
@@ -61,31 +61,67 @@ sql.gp_vacuum("cvm_sbx.some_table", full=True, verbose=True)
 
 ## Configuration
 
-Connection settings are read from environment variables, typically through a `.env`
-file in the working project.
+Connection settings are read from `.connections`. The package searches from
+the current working directory upward through parent directories. Public SQL
+functions accept a key from that file; backend behavior is selected from the
+key's `type`.
 
-Common variables include:
+```json
+{
+  "gp": {
+    "type": "gp",
+    "host": "gp.example",
+    "port": 5432,
+    "user": "user",
+    "password": "password",
+    "database": "db"
+  },
+  "gp_sandbox": {
+    "type": "gp",
+    "host": "gp-sandbox.example",
+    "user": "user",
+    "password": "password",
+    "database": "sandbox"
+  },
+  "trino": {
+    "type": "trino",
+    "host": "trino.example",
+    "port": 8080,
+    "user": "user",
+    "password": "password",
+    "catalog": "iceberg",
+    "schema": "sandbox",
+    "insert_chunk_size": 1000
+  },
+  "ch": {
+    "type": "ch",
+    "host": "ch.example",
+    "port": 8123,
+    "user": "user",
+    "password": "password",
+    "database": "default"
+  }
+}
+```
 
-- `TRINO_HOST`
-- `TRINO_PORT`
-- `TRINO_USER`
-- `TRINO_PASSWORD`
-- `TRINO_USE_KEYCHAIN_CERTS`
-- `TRINO_KEYCHAIN_CERT_NAMES`
-- `GP_HOST`
-- `GP_PORT`
-- `GP_USER`
-- `GP_PASSWORD`
-- `GP_DATABASE`
-- `CH_HOST`
-- `CH_PORT`
-- `CH_USER`
-- `CH_PASSWORD`
-- `CH_DATABASE`
+Trino supports optional `auth_mode`, `http_scheme`, `verify`,
+`use_keychain_certs`, `keychain_cert_names`, and `insert_chunk_size` fields.
 
-If keychain-backed Trino certificates are enabled, the package can export a CA bundle
-into a `certs/` directory under the active project root. This behavior is optional
-and only relevant in environments that rely on local keychain-managed certificates.
+## Migration From Env Vars
+
+Previous env-based configuration is no longer read. Move values into
+`.connections`:
+
+- `GP_HOST`, `GP_PORT`, `GP_USER`, `GP_PASSWORD`, `GP_DATABASE` -> a connection
+  with `"type": "gp"` and fields `host`, `port`, `user`, `password`, `database`
+- `TRINO_HOST`, `TRINO_PORT`, `TRINO_USER`, `TRINO_PASSWORD`, `TRINO_CATALOG`,
+  `TRINO_SCHEMA`, `TRINO_AUTH_MODE`, `TRINO_HTTP_SCHEME`, `TRINO_VERIFY`,
+  `TRINO_USE_KEYCHAIN_CERTS`, `TRINO_KEYCHAIN_CERT_NAMES` -> a connection with
+  `"type": "trino"` and matching lower-case fields
+- `TRINO_INSERT_CHUNK_SIZE` -> Trino connection field `insert_chunk_size`
+- `CH_HOST`, `CH_PORT`, `CH_USER`, `CH_PASSWORD`, `CH_DATABASE`, `CH_SECURE` ->
+  a connection with `"type": "ch"` and matching lower-case fields
+- `SQL_CONNECTIONS` -> the complete `.connections` file content
 
 ## Internal Layout
 

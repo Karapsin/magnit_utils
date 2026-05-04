@@ -30,10 +30,15 @@ class FakeClickHouseClient:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
         self.commands: list[str] = []
+        self.queries: list[str] = []
         self.close_calls = 0
 
     def command(self, sql: str) -> None:
         self.commands.append(sql)
+
+    def query(self, sql: str) -> object:
+        self.queries.append(sql)
+        return type("FakeResult", (), {"result_rows": [(1,)]})()
 
     def insert_df(
         self,
@@ -121,8 +126,8 @@ def test_build_create_table_sqls_creates_clickhouse_distributed_pair() -> None:
         ch_sharding_key="cityHash64(month_date, min_month_use)",
     )
 
-    assert len(sqls) == 2
-    shard_sql, distributed_sql = sqls
+    assert len(sqls) == 3
+    shard_sql, distributed_sql, local_distributed_sql = sqls
     assert "SETTINGS index_granularity" not in "\n".join(sqls)
     assert shard_sql.startswith(
         f"CREATE TABLE IF NOT EXISTS {TEST_CH_SHARD_TABLE}"
@@ -142,6 +147,11 @@ def test_build_create_table_sqls_creates_clickhouse_distributed_pair() -> None:
     assert "    currentDatabase()," in distributed_sql
     assert f"    '{TEST_CH_SHARD_RELATION}'," in distributed_sql
     assert "    cityHash64(month_date, min_month_use)" in distributed_sql
+    assert local_distributed_sql.startswith(
+        f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}"
+    )
+    assert "ON CLUSTER" not in local_distributed_sql
+    assert "ENGINE = Distributed(" in local_distributed_sql
 
 
 def test_load_df_clickhouse_creates_pair_and_loads_distributed_table(monkeypatch) -> None:
@@ -173,18 +183,30 @@ def test_load_df_clickhouse_creates_pair_and_loads_distributed_table(monkeypatch
     )
 
     assert inserted_rows == 1
-    assert client.commands[0] == (
+    assert f"DROP TABLE IF EXISTS {TEST_CH_TABLE}" in client.commands
+    assert f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE}" in client.commands
+    assert (
         f"DROP TABLE IF EXISTS {TEST_CH_TABLE} ON CLUSTER core"
+        in client.commands
     )
-    assert client.commands[1] == (
+    assert (
         f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE} ON CLUSTER core"
-    )
-    assert client.commands[2].startswith(
-        f"CREATE TABLE IF NOT EXISTS {TEST_CH_SHARD_TABLE}"
+        in client.commands
     )
     assert "SETTINGS index_granularity" not in "\n".join(client.commands)
-    assert client.commands[3].startswith(
-        f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}"
+    assert any(
+        command.startswith(f"CREATE TABLE IF NOT EXISTS {TEST_CH_SHARD_TABLE}")
+        for command in client.commands
+    )
+    assert any(
+        command.startswith(f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}")
+        and "ON CLUSTER core" in command
+        for command in client.commands
+    )
+    assert any(
+        command.startswith(f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}")
+        and "ON CLUSTER" not in command
+        for command in client.commands
     )
     assert client.calls[0]["table"] == TEST_CH_TABLE
     assert client.close_calls == 1
@@ -213,19 +235,31 @@ def test_finalize_stage_table_clickhouse_recreates_pair_and_inserts_target() -> 
         ch_sharding_key="cityHash64(month_date, min_month_use)",
     )
 
-    assert client.commands[0] == (
+    assert f"DROP TABLE IF EXISTS {TEST_CH_TABLE}" in client.commands
+    assert f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE}" in client.commands
+    assert (
         f"DROP TABLE IF EXISTS {TEST_CH_TABLE} ON CLUSTER core"
+        in client.commands
     )
-    assert client.commands[1] == (
+    assert (
         f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE} ON CLUSTER core"
+        in client.commands
     )
-    assert client.commands[2].startswith(
-        f"CREATE TABLE IF NOT EXISTS {TEST_CH_SHARD_TABLE}"
+    assert any(
+        command.startswith(f"CREATE TABLE IF NOT EXISTS {TEST_CH_SHARD_TABLE}")
+        for command in client.commands
     )
-    assert client.commands[3].startswith(
-        f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}"
+    assert any(
+        command.startswith(f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}")
+        and "ON CLUSTER core" in command
+        for command in client.commands
     )
-    assert client.commands[4] == (
+    assert any(
+        command.startswith(f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}")
+        and "ON CLUSTER" not in command
+        for command in client.commands
+    )
+    assert client.commands[-1] == (
         f"INSERT INTO {TEST_CH_TABLE} "
         f"SELECT * FROM {TEST_CH_STAGE_TABLE}"
     )
