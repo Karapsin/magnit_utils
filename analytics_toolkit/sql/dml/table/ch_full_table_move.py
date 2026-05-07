@@ -111,13 +111,13 @@ def ch_full_table_move(
             ch_partition_by=partition_override,
             ch_order_by=order_override,
             ch_engine=engine_override,
-            ch_cluster=cluster_override,
+            ch_cluster=target_cluster,
         )
         target_distributed_ddl = _build_target_distributed_ddl(
             source_distributed_ddl,
             target_table,
             target_shard_table,
-            ch_cluster=cluster_override,
+            ch_cluster=target_cluster,
             sharding_key=sharding_key_override,
         )
 

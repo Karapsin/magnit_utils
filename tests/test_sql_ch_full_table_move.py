@@ -54,6 +54,37 @@ ENGINE = Distributed(
 )
 """.strip()
 
+SOURCE_SHARD_DDL_WITH_UUID_MACRO = f"""
+CREATE TABLE {SOURCE_SHARD_TABLE}
+UUID '11111111-1111-1111-1111-111111111111'
+(
+    `id` UInt64,
+    `dt` Date,
+    `amount` Decimal(18, 4),
+    `name` LowCardinality(String)
+)
+ENGINE = ReplicatedMergeTree('/clickhouse/tables/{{uuid}}/{{shard}}', '{{replica}}')
+PARTITION BY toYYYYMM(dt)
+ORDER BY (dt, id)
+""".strip()
+
+SOURCE_DISTRIBUTED_DDL_WITHOUT_ON_CLUSTER = f"""
+CREATE TABLE {SOURCE_TABLE}
+UUID '22222222-2222-2222-2222-222222222222'
+(
+    `id` UInt64,
+    `dt` Date,
+    `amount` Decimal(18, 4),
+    `name` LowCardinality(String)
+)
+ENGINE = Distributed(
+    'core',
+    currentDatabase(),
+    'events_move_shard',
+    cityHash64(id)
+)
+""".strip()
+
 
 class FakeClickHouseResult:
     def __init__(self, result_rows: list[tuple[Any, ...]]) -> None:
@@ -61,7 +92,13 @@ class FakeClickHouseResult:
 
 
 class FakeClickHouseClient:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        source_shard_ddl: str = SOURCE_SHARD_DDL,
+        source_distributed_ddl: str = SOURCE_DISTRIBUTED_DDL,
+    ) -> None:
+        self.source_shard_ddl = source_shard_ddl
+        self.source_distributed_ddl = source_distributed_ddl
         self.commands: list[str] = []
         self.command_settings: list[dict[str, object] | None] = []
         self.queries: list[str] = []
@@ -78,9 +115,9 @@ class FakeClickHouseClient:
     def query(self, sql: str) -> FakeClickHouseResult:
         self.queries.append(sql)
         if sql == f"SHOW CREATE TABLE {SOURCE_SHARD_TABLE}":
-            return FakeClickHouseResult([(SOURCE_SHARD_DDL,)])
+            return FakeClickHouseResult([(self.source_shard_ddl,)])
         if sql == f"SHOW CREATE TABLE {SOURCE_TABLE}":
-            return FakeClickHouseResult([(SOURCE_DISTRIBUTED_DDL,)])
+            return FakeClickHouseResult([(self.source_distributed_ddl,)])
         if sql == f"EXISTS TABLE {TARGET_TABLE}":
             return FakeClickHouseResult([(1,)])
         raise AssertionError(f"Unexpected query: {sql}")
@@ -244,6 +281,29 @@ def test_ch_full_table_move_sharding_key_override_replaces_final_distributed_arg
 
     assert "sipHash64(id)" in distributed_create
     assert "cityHash64(id)" not in distributed_create
+
+
+def test_ch_full_table_move_adds_inferred_cluster_for_uuid_macro_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = FakeClickHouseClient(
+        source_shard_ddl=SOURCE_SHARD_DDL_WITH_UUID_MACRO,
+        source_distributed_ddl=SOURCE_DISTRIBUTED_DDL_WITHOUT_ON_CLUSTER,
+    )
+    monkeypatch.setattr(
+        ch_move_module,
+        "get_sql_connection",
+        lambda connection_key: fake_client,
+    )
+
+    shard_create, distributed_create, local_distributed_create = _run_move(fake_client)
+
+    assert "ON CLUSTER core" in shard_create
+    assert "ON CLUSTER core" in distributed_create
+    assert "ON CLUSTER" not in local_distributed_create
+    assert "{uuid}" in shard_create
+    assert "\nUUID " not in shard_create
+    assert "'core'" in distributed_create
 
 
 def test_ch_full_table_move_rejects_non_clickhouse_alias(
