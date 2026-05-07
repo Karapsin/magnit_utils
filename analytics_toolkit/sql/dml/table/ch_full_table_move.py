@@ -294,16 +294,17 @@ def _remove_uuid_clause(ddl: str) -> str:
 
 
 def _replace_or_add_on_cluster_clause(ddl: str, ch_cluster: str) -> str:
+    cluster_sql = _format_on_cluster_name(ch_cluster)
     clause_start = _find_top_level_keyword(ddl, "ON CLUSTER")
     if clause_start >= 0:
         value_start = _skip_whitespace(ddl, clause_start + len("ON CLUSTER"))
         value_end = _scan_single_value_end(ddl, value_start)
-        return ddl[:value_start] + ch_cluster + ddl[value_end:]
+        return ddl[:value_start] + cluster_sql + ddl[value_end:]
 
     _, table_identifier_end = _find_create_table_identifier_span(ddl)
     return (
         ddl[:table_identifier_end]
-        + f" ON CLUSTER {ch_cluster}"
+        + f" ON CLUSTER {cluster_sql}"
         + ddl[table_identifier_end:]
     )
 
@@ -400,6 +401,17 @@ def _format_clickhouse_identifier(identifier: str) -> str:
     if _is_simple_identifier(normalized):
         return normalized
     return quote_identifier(normalized, "ch")
+
+
+def _format_on_cluster_name(cluster_name: str) -> str:
+    normalized = cluster_name.strip()
+    if not normalized:
+        return normalized
+    if normalized[0] in {"'", '"', "`"}:
+        return normalized
+    if _is_simple_identifier(normalized):
+        return normalized
+    return _sql_string_literal(normalized)
 
 
 def _rewrite_distributed_engine_args(

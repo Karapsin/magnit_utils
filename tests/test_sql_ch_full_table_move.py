@@ -86,6 +86,10 @@ ENGINE = Distributed(
 )
 """.strip()
 
+SOURCE_DISTRIBUTED_DDL_WITH_CLUSTER_MACRO = (
+    SOURCE_DISTRIBUTED_DDL_WITHOUT_ON_CLUSTER.replace("'core'", "'{cluster}'")
+)
+
 SOURCE_CUSTOM_SHARD_DDL = SOURCE_SHARD_DDL.replace(
     SOURCE_SHARD_TABLE,
     SOURCE_CUSTOM_SHARD_TABLE,
@@ -347,6 +351,32 @@ def test_ch_full_table_move_uses_shard_name_from_distributed_engine(
     ]
     assert f"CREATE TABLE IF NOT EXISTS {TARGET_SHARD_TABLE}" in shard_create
     assert "'events_target_shard'" in distributed_create
+
+
+def test_ch_full_table_move_quotes_cluster_macro_for_on_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = FakeClickHouseClient(
+        source_shard_ddl=SOURCE_SHARD_DDL_WITH_UUID_MACRO,
+        source_distributed_ddl=SOURCE_DISTRIBUTED_DDL_WITH_CLUSTER_MACRO,
+    )
+    monkeypatch.setattr(
+        ch_move_module,
+        "get_sql_connection",
+        lambda connection_key: fake_client,
+    )
+
+    shard_create, distributed_create, _ = _run_move(fake_client)
+
+    assert f"DROP TABLE IF EXISTS {TARGET_TABLE} ON CLUSTER '{{cluster}}'" in (
+        fake_client.commands
+    )
+    assert f"DROP TABLE IF EXISTS {SOURCE_TABLE} ON CLUSTER '{{cluster}}'" in (
+        fake_client.commands
+    )
+    assert "ON CLUSTER '{cluster}'" in shard_create
+    assert "ON CLUSTER '{cluster}'" in distributed_create
+    assert "Distributed(\n    '{cluster}'," in distributed_create
 
 
 def test_ch_full_table_move_rejects_non_clickhouse_alias(

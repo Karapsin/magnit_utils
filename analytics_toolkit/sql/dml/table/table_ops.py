@@ -432,7 +432,23 @@ def _ch_cluster_clause(ch_cluster: str | None) -> str:
     normalized = ch_cluster.strip()
     if not normalized:
         raise ValueError("ch_cluster must not be empty.")
-    return f" ON CLUSTER {normalized}"
+    return f" ON CLUSTER {_format_ch_cluster_name(normalized)}"
+
+
+def _format_ch_cluster_name(cluster_name: str) -> str:
+    if cluster_name[0] in {"'", '"', "`"}:
+        return cluster_name
+    if _is_simple_identifier(cluster_name):
+        return cluster_name
+    return "'" + cluster_name.replace("'", "''") + "'"
+
+
+def _is_simple_identifier(identifier: str) -> bool:
+    if not identifier:
+        return False
+    if not (identifier[0].isalpha() or identifier[0] == "_"):
+        return False
+    return all(char.isalnum() or char == "_" for char in identifier)
 
 
 def _execute_ch_command(connection: Any, sql: str) -> None:
