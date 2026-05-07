@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 config_module = importlib.import_module("analytics_toolkit.sql.connection.config")
 api_module = importlib.import_module("analytics_toolkit.sql.dml.transfer.flow.api")

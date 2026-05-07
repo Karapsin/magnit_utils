@@ -17,6 +17,7 @@ sql.gp_vacuum(...)
 sql.create_sql_table(...)
 sql.load_df(..., retry_cnt=5, timeout_increment=5)
 sql.transfer(..., trino_insert_chunk_size=1000)
+sql.ch_full_table_move(...)
 sql.get_sql_connection(...)
 ```
 
@@ -28,6 +29,8 @@ sql.get_sql_connection(...)
 - `create_sql_table`: build and execute `CREATE TABLE` statements
 - `load_df`: load a pandas dataframe into a SQL table
 - `transfer_table` / `transfer`: move data between supported backends
+- `ch_full_table_move`: recreate a ClickHouse distributed/shard table pair
+  from source DDL, copy all rows, and drop the source pair
 - `get_sql_connection`: open a backend connection directly
 - `with_sql_connection`: decorate a function with managed connection lifecycle
 
@@ -45,6 +48,12 @@ For ClickHouse targets, `load_df` and `transfer_table` create a local
 `Distributed` table. Use `ch_partition_by`, `ch_order_by`, `ch_engine`,
 `ch_cluster`, and `sharding_key` to control the shard DDL and distributed
 sharding expression.
+
+`ch_full_table_move` is ClickHouse-only. It reads `SHOW CREATE TABLE` for
+`<move_table>_shard` and `move_table`, creates the destination shard/distributed
+pair with the same columns, types, engine clauses, settings, cluster, and
+sharding expression unless an override is provided, copies rows with
+`INSERT INTO <to_table> SELECT * FROM <move_table>`, then drops the source pair.
 
 ## Greenplum Maintenance
 
