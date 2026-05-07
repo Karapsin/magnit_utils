@@ -87,21 +87,21 @@ def test_ch_create_table_as_creates_pair_and_inserts_query(
     assert fake_client.commands[:4] == [
         f"DROP TABLE IF EXISTS {TARGET_TABLE}",
         f"DROP TABLE IF EXISTS {TARGET_SHARD_TABLE}",
-        f"DROP TABLE IF EXISTS {TARGET_TABLE} ON CLUSTER core",
-        f"DROP TABLE IF EXISTS {TARGET_SHARD_TABLE} ON CLUSTER core",
+        f"DROP TABLE IF EXISTS {TARGET_TABLE} ON CLUSTER '{{cluster}}'",
+        f"DROP TABLE IF EXISTS {TARGET_SHARD_TABLE} ON CLUSTER '{{cluster}}'",
     ]
     shard_sql, distributed_sql, local_distributed_sql = fake_client.commands[4:7]
     assert shard_sql.startswith(f"CREATE TABLE IF NOT EXISTS {TARGET_SHARD_TABLE}")
-    assert "ON CLUSTER core" in shard_sql
+    assert "ON CLUSTER '{cluster}'" in shard_sql
     assert "ENGINE = ReplicatedMergeTree" in shard_sql
     assert "PARTITION BY `dt`" in shard_sql
     assert "ORDER BY (`dt`, `id`)" in shard_sql
     assert "FROM (\n" + QUERY + "\n)" in shard_sql
     assert "LIMIT 0" in shard_sql
     assert distributed_sql.startswith(f"CREATE TABLE IF NOT EXISTS {TARGET_TABLE}")
-    assert "ON CLUSTER core" in distributed_sql
+    assert "ON CLUSTER '{cluster}'" in distributed_sql
     assert "ENGINE = Distributed(" in distributed_sql
-    assert "    'core'," in distributed_sql
+    assert "    '{cluster}'," in distributed_sql
     assert "    'default'," in distributed_sql
     assert "    'events_result_shard'," in distributed_sql
     assert "    cityHash64(dt, id)" in distributed_sql
@@ -122,7 +122,6 @@ def test_ch_create_table_as_quotes_cluster_macro(
         "ch",
         TARGET_TABLE,
         QUERY,
-        ch_cluster="{cluster}",
     )
 
     assert f"DROP TABLE IF EXISTS {TARGET_TABLE} ON CLUSTER '{{cluster}}'" in (

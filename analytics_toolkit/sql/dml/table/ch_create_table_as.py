@@ -33,7 +33,7 @@ def ch_create_table_as(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     sharding_key: str = "rand()",
 ) -> None:
     config = get_connection_config(db_key)
@@ -98,7 +98,7 @@ def build_ch_create_table_as_sqls(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
 ) -> list[str]:
     target_table = _normalize_non_empty_string(table_name, "table_name")

@@ -64,7 +64,9 @@ distributed/shard table pair, creates a new `<target>_shard` table from the
 provided query schema, creates the target `Distributed` table, and inserts the
 query result into the distributed target. It accepts the same ClickHouse DDL
 options as `load_df`: `ch_partition_by`, `ch_order_by`, `ch_engine`,
-`ch_cluster`, and `sharding_key`.
+`ch_cluster`, and `sharding_key`. Its default `ch_cluster` is the ClickHouse
+`{cluster}` macro so the created tables are visible across the full cluster on
+Yandex Managed ClickHouse.
 
 `ch_full_table_move` is ClickHouse-only. It reads `SHOW CREATE TABLE` for
 `move_table`, extracts the source shard table from its `Distributed` engine, and
