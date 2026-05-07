@@ -13,8 +13,10 @@ from analytics_toolkit import sql
 
 sql.read(..., retry_cnt=5, timeout_increment=5)
 sql.execute(..., retry_cnt=5, timeout_increment=5)
+sql.execute_read(..., retry_cnt=5, timeout_increment=5)
 sql.gp_vacuum(...)
 sql.create_sql_table(...)
+sql.ch_create_table_as(...)
 sql.load_df(..., retry_cnt=5, timeout_increment=5)
 sql.transfer(..., trino_insert_chunk_size=1000)
 sql.ch_full_table_move(...)
@@ -25,8 +27,12 @@ sql.get_sql_connection(...)
 
 - `read_sql` / `read`: run a query and return a dataframe
 - `execute_sql` / `execute`: run SQL statements without returning a dataframe
+- `execute_read`: run setup SQL statements and return the final statement as a
+  dataframe
 - `gp_vacuum`: run Greenplum `VACUUM` outside a transaction block
 - `create_sql_table`: build and execute `CREATE TABLE` statements
+- `ch_create_table_as`: recreate a ClickHouse distributed/shard table pair
+  from a query result
 - `load_df`: load a pandas dataframe into a SQL table
 - `transfer_table` / `transfer`: move data between supported backends
 - `ch_full_table_move`: recreate a ClickHouse distributed/shard table pair
@@ -34,9 +40,13 @@ sql.get_sql_connection(...)
 - `get_sql_connection`: open a backend connection directly
 - `with_sql_connection`: decorate a function with managed connection lifecycle
 
-`read_sql`, `execute_sql`, `load_df`, and `transfer_table` all support
-`retry_cnt` and `timeout_increment`. Retries restart the whole public operation
-from the beginning with a fresh connection.
+`read_sql`, `execute_sql`, `execute_read`, `load_df`, and `transfer_table` all
+support `retry_cnt` and `timeout_increment`. Retries restart the whole public
+operation from the beginning with a fresh connection.
+
+`execute_read` accepts the same execution options as `execute_sql`. It splits
+the provided SQL into statements, executes every statement except the last, then
+reads the last statement into a pandas dataframe on the same connection.
 
 For Trino targets, `load_df` and `transfer_table` also accept
 `trino_insert_chunk_size` to control how many rows are sent in each
@@ -49,10 +59,18 @@ For ClickHouse targets, `load_df` and `transfer_table` create a local
 `ch_cluster`, and `sharding_key` to control the shard DDL and distributed
 sharding expression.
 
+`ch_create_table_as` is ClickHouse-only. It drops any existing target
+distributed/shard table pair, creates a new `<target>_shard` table from the
+provided query schema, creates the target `Distributed` table, and inserts the
+query result into the distributed target. It accepts the same ClickHouse DDL
+options as `load_df`: `ch_partition_by`, `ch_order_by`, `ch_engine`,
+`ch_cluster`, and `sharding_key`.
+
 `ch_full_table_move` is ClickHouse-only. It reads `SHOW CREATE TABLE` for
-`<move_table>_shard` and `move_table`, creates the destination shard/distributed
-pair with the same columns, types, engine clauses, settings, cluster, and
-sharding expression unless an override is provided, copies rows with
+`move_table`, extracts the source shard table from its `Distributed` engine, and
+then reads that shard DDL. It creates the destination shard/distributed pair
+with the same columns, types, engine clauses, settings, cluster, and sharding
+expression unless an override is provided, copies rows with
 `INSERT INTO <to_table> SELECT * FROM <move_table>`, then drops the source pair.
 
 ## Greenplum Maintenance

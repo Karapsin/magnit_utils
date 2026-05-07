@@ -1,5 +1,6 @@
 """Shared table operations and validation helpers used by load and transfer flows."""
 
+from .ch_create_table_as import ch_create_table_as
 from .ch_full_table_move import ch_full_table_move
 from .table_ops import (
     analyze_table,
@@ -21,6 +22,7 @@ from .table_validation import (
 
 __all__ = [
     "analyze_table",
+    "ch_create_table_as",
     "ch_full_table_move",
     "clear_target_table",
     "drop_table",

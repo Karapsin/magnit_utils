@@ -1,0 +1,223 @@
+from __future__ import annotations
+
+from typing import Any
+
+import pandas as pd
+
+from ...connection.config import get_connection_config
+from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
+from ...connection.get_sql_connection import get_sql_connection
+from ..transfer.runtime.retry import rollback_quietly, run_with_retry
+from analytics_toolkit.general import time_print
+from .execute_sql import (
+    _execute_ch_statement,
+    _execute_trino_statement,
+    _iterate_statements_with_progress,
+    _maybe_print_query,
+    _maybe_sleep_between_queries,
+    _split_sql_statements,
+)
+
+
+def execute_read(
+    connection_type: str,
+    query: str,
+    random_sleep_seconds: float | None = 5,
+    print_queries: bool = True,
+    gp_break_query: bool = False,
+    gp_commit_each_statement: bool = False,
+    retry_cnt: int = 5,
+    timeout_increment: int | float = 5,
+) -> pd.DataFrame:
+    config = get_connection_config(connection_type)
+    connection_key = config.connection_key
+    backend = config.backend
+    sql = query.strip()
+
+    if not sql:
+        raise InvalidSqlInputError("Query string must not be empty.")
+    if retry_cnt < 1:
+        raise ValueError("retry_cnt must be at least 1.")
+    if timeout_increment < 0:
+        raise ValueError("timeout_increment must be non-negative.")
+
+    statements = _split_sql_statements(sql)
+    if not statements:
+        raise InvalidSqlInputError("Query string must not be empty.")
+
+    def operation(attempt: int) -> pd.DataFrame:
+        connection = get_sql_connection(connection_key)
+        try:
+            if backend == "trino":
+                return _execute_read_trino(
+                    connection,
+                    statements,
+                    random_sleep_seconds=random_sleep_seconds,
+                    print_queries=print_queries,
+                )
+            if backend == "gp":
+                return _execute_read_gp(
+                    connection,
+                    statements,
+                    random_sleep_seconds=random_sleep_seconds,
+                    print_queries=print_queries,
+                    gp_break_query=gp_break_query,
+                    gp_commit_each_statement=gp_commit_each_statement,
+                )
+            if backend == "ch":
+                return _execute_read_ch(
+                    connection,
+                    statements,
+                    random_sleep_seconds=random_sleep_seconds,
+                    print_queries=print_queries,
+                )
+            raise UnsupportedConnectionTypeError(
+                "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+            )
+        except Exception:
+            if backend == "gp":
+                rollback_quietly(connection)
+            raise
+        finally:
+            time_print(f"Closing {connection_key} connection")
+            connection.close()
+
+    return run_with_retry(
+        operation_name=(
+            f"executing SQL and reading final query on {connection_key} ({backend})"
+        ),
+        retry_cnt=retry_cnt,
+        timeout_increment=timeout_increment,
+        operation=operation,
+    )
+
+
+def _execute_read_trino(
+    conn: Any,
+    statements: list[str],
+    random_sleep_seconds: float | None = 5,
+    print_queries: bool = True,
+) -> pd.DataFrame:
+    time_print(
+        f"Executing {max(len(statements) - 1, 0)} setup statement(s) "
+        "and reading final query on trino"
+    )
+    cursor = conn.cursor()
+    try:
+        _execute_setup_statements(
+            cursor,
+            statements[:-1],
+            connection_type="trino",
+            execute_statement=_execute_trino_statement,
+            random_sleep_seconds=random_sleep_seconds,
+            print_queries=print_queries,
+        )
+        return _read_dbapi_cursor(cursor, statements[-1], "trino", print_queries)
+    except Exception:
+        time_print(f"SQL failed on trino:\n{statements[-1]}")
+        raise
+    finally:
+        cursor.close()
+
+
+def _execute_read_gp(
+    conn: Any,
+    statements: list[str],
+    random_sleep_seconds: float | None = 5,
+    print_queries: bool = True,
+    gp_break_query: bool = False,
+    gp_commit_each_statement: bool = False,
+) -> pd.DataFrame:
+    time_print(
+        f"Executing {max(len(statements) - 1, 0)} setup statement(s) "
+        "and reading final query on gp"
+    )
+    cursor = conn.cursor()
+    should_commit_at_end = len(statements) > 1
+    try:
+        setup_statements = statements[:-1]
+        if setup_statements and not gp_break_query:
+            setup_sql = ";\n".join(setup_statements)
+            _maybe_print_query(setup_sql, print_queries, split_preview=False)
+            cursor.execute(setup_sql)
+        else:
+            total = len(statements)
+            for index, statement in enumerate(
+                _iterate_statements_with_progress(setup_statements, "gp"),
+                start=1,
+            ):
+                _maybe_print_query(statement, print_queries, split_preview=True)
+                cursor.execute(statement)
+                if gp_commit_each_statement:
+                    conn.commit()
+                    should_commit_at_end = False
+                _maybe_sleep_between_queries(index, total, random_sleep_seconds)
+
+        result = _read_dbapi_cursor(cursor, statements[-1], "gp", print_queries)
+        if should_commit_at_end:
+            conn.commit()
+        return result
+    except Exception:
+        time_print(f"SQL failed on gp:\n{statements[-1]}")
+        raise
+    finally:
+        cursor.close()
+
+
+def _execute_read_ch(
+    client: Any,
+    statements: list[str],
+    random_sleep_seconds: float | None = 5,
+    print_queries: bool = True,
+) -> pd.DataFrame:
+    time_print(
+        f"Executing {max(len(statements) - 1, 0)} setup statement(s) "
+        "and reading final query on ch"
+    )
+    try:
+        _execute_setup_statements(
+            client,
+            statements[:-1],
+            connection_type="ch",
+            execute_statement=_execute_ch_statement,
+            random_sleep_seconds=random_sleep_seconds,
+            print_queries=print_queries,
+        )
+        _maybe_print_query(statements[-1], print_queries, split_preview=True)
+        return client.query_df(statements[-1])
+    except Exception:
+        time_print(f"SQL failed on ch:\n{statements[-1]}")
+        raise
+
+
+def _execute_setup_statements(
+    executor: Any,
+    statements: list[str],
+    *,
+    connection_type: str,
+    execute_statement: Any,
+    random_sleep_seconds: float | None,
+    print_queries: bool,
+) -> None:
+    total = len(statements) + 1
+    for index, statement in enumerate(
+        _iterate_statements_with_progress(statements, connection_type),
+        start=1,
+    ):
+        _maybe_print_query(statement, print_queries, split_preview=True)
+        execute_statement(executor, statement)
+        _maybe_sleep_between_queries(index, total, random_sleep_seconds)
+
+
+def _read_dbapi_cursor(
+    cursor: Any,
+    query: str,
+    connection_type: str,
+    print_queries: bool,
+) -> pd.DataFrame:
+    time_print(f"Reading DataFrame from {connection_type}")
+    _maybe_print_query(query, print_queries, split_preview=True)
+    cursor.execute(query)
+    columns = [column[0] for column in cursor.description or []]
+    rows = cursor.fetchall()
+    return pd.DataFrame(rows, columns=columns)
