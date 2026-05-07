@@ -96,14 +96,26 @@ def ch_full_table_move(
             f"Moving ClickHouse table {source_table} to "
             f"{target_table} on {config.connection_key}"
         )
-        source_shard_ddl = _show_create_table(connection, source_shard_table)
+        time_print(f"Reading ClickHouse DDL for distributed table {source_table}")
         source_distributed_ddl = _show_create_table(connection, source_table)
+        source_shard_table = (
+            _extract_distributed_shard_table_name(
+                source_distributed_ddl,
+                source_table,
+            )
+            or source_shard_table
+        )
+        time_print(f"Resolved source shard table {source_shard_table}")
+        time_print(f"Reading ClickHouse DDL for shard table {source_shard_table}")
+        source_shard_ddl = _show_create_table(connection, source_shard_table)
         source_cluster = (
             _extract_on_cluster_name(source_shard_ddl)
             or _extract_on_cluster_name(source_distributed_ddl)
             or _extract_distributed_cluster_name(source_distributed_ddl)
         )
         target_cluster = cluster_override or source_cluster
+        if target_cluster is not None:
+            time_print(f"Using ClickHouse cluster {target_cluster} for target DDL")
 
         target_shard_ddl = _build_target_shard_ddl(
             source_shard_ddl,
@@ -121,15 +133,34 @@ def ch_full_table_move(
             sharding_key=sharding_key_override,
         )
 
+        time_print(
+            f"Dropping target ClickHouse table pair {target_table} / "
+            f"{target_shard_table}"
+        )
         _drop_ch_distributed_table_pair(connection, target_table, target_cluster)
+        time_print(f"Creating target shard table {target_shard_table}")
         _execute_ch_command(connection, target_shard_ddl)
+        time_print(f"Creating target distributed table {target_table}")
         _execute_ch_command(connection, target_distributed_ddl)
         local_distributed_ddl = _remove_on_cluster_clause(target_distributed_ddl)
         if local_distributed_ddl != target_distributed_ddl:
+            time_print(f"Creating local distributed table {target_table}")
             _execute_ch_command(connection, local_distributed_ddl)
+        time_print(f"Waiting for target table {target_table}")
         _wait_for_ch_table(connection, target_table)
+        time_print(f"Inserting data from {source_table} into {target_table}")
         insert_from_table("ch", connection, target_table, source_table)
-        _drop_ch_distributed_table_pair(connection, source_table, source_cluster)
+        time_print(
+            f"Dropping source ClickHouse table pair {source_table} / "
+            f"{source_shard_table}"
+        )
+        _drop_ch_distributed_table_pair(
+            connection,
+            source_table,
+            source_cluster,
+            shard_table=source_shard_table,
+        )
+        time_print(f"Finished moving ClickHouse table {source_table} to {target_table}")
     finally:
         time_print(f"Closing {config.connection_key} connection")
         connection.close()
@@ -216,8 +247,10 @@ def _drop_ch_distributed_table_pair(
     connection: Any,
     table_name: str,
     ch_cluster: str | None,
+    *,
+    shard_table: str | None = None,
 ) -> None:
-    shard_table = build_ch_shard_table_name(table_name)
+    shard_table = shard_table or build_ch_shard_table_name(table_name)
     drop_table("ch", connection, table_name)
     drop_table("ch", connection, shard_table)
     if ch_cluster is not None:
@@ -304,6 +337,69 @@ def _extract_distributed_cluster_name(ddl: str) -> str | None:
         return None
     start, end = spans[0]
     return _normalize_extracted_sql_value(args_sql[start:end])
+
+
+def _extract_distributed_shard_table_name(
+    ddl: str,
+    distributed_table: str,
+) -> str | None:
+    args_span = _find_distributed_args_span(ddl)
+    if args_span is None:
+        return None
+    args_start, args_end = args_span
+    args_sql = ddl[args_start:args_end]
+    spans = _split_top_level_argument_spans(args_sql)
+    if len(spans) < 3:
+        return None
+
+    database_start, database_end = spans[1]
+    relation_start, relation_end = spans[2]
+    database_name = _normalize_distributed_database_name(
+        args_sql[database_start:database_end],
+        distributed_table,
+    )
+    relation_name = _normalize_extracted_sql_value(
+        args_sql[relation_start:relation_end],
+    )
+    if relation_name is None:
+        return None
+    if database_name is None:
+        return _format_clickhouse_identifier(relation_name)
+    return (
+        f"{_format_clickhouse_identifier(database_name)}."
+        f"{_format_clickhouse_identifier(relation_name)}"
+    )
+
+
+def _normalize_distributed_database_name(
+    value: str,
+    distributed_table: str,
+) -> str | None:
+    normalized = _normalize_extracted_sql_value(value)
+    if normalized is None:
+        return None
+    compact = "".join(normalized.split()).lower()
+    if compact in {"currentdatabase()", "database()"}:
+        return _extract_table_database_name(distributed_table)
+    return normalized
+
+
+def _extract_table_database_name(table_name: str) -> str | None:
+    database_sql, _ = split_ch_table_name_for_distributed_engine(table_name)
+    if database_sql == "currentDatabase()":
+        return None
+    return _normalize_extracted_sql_value(database_sql)
+
+
+def _format_clickhouse_identifier(identifier: str) -> str:
+    normalized = identifier.strip()
+    if not normalized:
+        return normalized
+    if normalized[0] in {"`", '"'}:
+        return normalized
+    if _is_simple_identifier(normalized):
+        return normalized
+    return quote_identifier(normalized, "ch")
 
 
 def _rewrite_distributed_engine_args(
@@ -719,3 +815,11 @@ def _sql_string_literal(value: str) -> str:
 
 def _is_identifier_char(char: str) -> bool:
     return char.isalnum() or char == "_"
+
+
+def _is_simple_identifier(identifier: str) -> bool:
+    if not identifier:
+        return False
+    if not (identifier[0].isalpha() or identifier[0] == "_"):
+        return False
+    return all(_is_identifier_char(char) for char in identifier)
