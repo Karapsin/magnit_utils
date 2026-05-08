@@ -57,7 +57,9 @@ For ClickHouse targets, `load_df` and `transfer_table` create a local
 `<target>_shard` table first and then create the requested target as a
 `Distributed` table. Use `ch_partition_by`, `ch_order_by`, `ch_engine`,
 `ch_cluster`, and `sharding_key` to control the shard DDL and distributed
-sharding expression.
+sharding expression. The default `ch_cluster` is the ClickHouse `{cluster}`
+macro so created distributed/shard table pairs are visible across the full
+cluster on Yandex Managed ClickHouse.
 
 `ch_create_table_as` is ClickHouse-only. It drops any existing target
 distributed/shard table pair, creates a new `<target>_shard` table from the
@@ -71,9 +73,11 @@ Yandex Managed ClickHouse.
 `ch_full_table_move` is ClickHouse-only. It reads `SHOW CREATE TABLE` for
 `move_table`, extracts the source shard table from its `Distributed` engine, and
 then reads that shard DDL. It creates the destination shard/distributed pair
-with the same columns, types, engine clauses, settings, cluster, and sharding
-expression unless an override is provided, copies rows with
-`INSERT INTO <to_table> SELECT * FROM <move_table>`, then drops the source pair.
+with the same columns, types, engine clauses, settings, and sharding expression.
+By default the destination uses the ClickHouse `{cluster}` macro; pass
+`ch_cluster=None` to reuse the cluster extracted from the source DDL. It copies
+rows with `INSERT INTO <to_table> SELECT * FROM <move_table>`, then drops the
+source pair.
 
 ## Greenplum Maintenance
 

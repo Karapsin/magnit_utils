@@ -15,7 +15,7 @@ class LoadOptions:
     ch_partition_by: list[str] | str | None = None
     ch_order_by: list[str] | str | None = None
     ch_engine: str = "ReplicatedMergeTree"
-    ch_cluster: str = "core"
+    ch_cluster: str = "{cluster}"
     ch_sharding_key: str = "rand()"
 
 

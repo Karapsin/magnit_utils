@@ -184,8 +184,8 @@ def test_ch_full_table_move_preserves_source_ddl_and_lifecycle(
     assert fake_client.commands[:4] == [
         f"DROP TABLE IF EXISTS {TARGET_TABLE}",
         f"DROP TABLE IF EXISTS {TARGET_SHARD_TABLE}",
-        f"DROP TABLE IF EXISTS {TARGET_TABLE} ON CLUSTER core",
-        f"DROP TABLE IF EXISTS {TARGET_SHARD_TABLE} ON CLUSTER core",
+        f"DROP TABLE IF EXISTS {TARGET_TABLE} ON CLUSTER '{{cluster}}'",
+        f"DROP TABLE IF EXISTS {TARGET_SHARD_TABLE} ON CLUSTER '{{cluster}}'",
     ]
     assert fake_client.commands[7] == (
         f"INSERT INTO {TARGET_TABLE} SELECT * FROM {SOURCE_TABLE}"
@@ -203,8 +203,8 @@ def test_ch_full_table_move_preserves_source_ddl_and_lifecycle(
     )
     assert f"CREATE TABLE IF NOT EXISTS {TARGET_TABLE}" in distributed_create
     assert f"CREATE TABLE IF NOT EXISTS {TARGET_TABLE}" in local_distributed_create
-    assert "ON CLUSTER core" in shard_create
-    assert "ON CLUSTER core" in distributed_create
+    assert "ON CLUSTER '{cluster}'" in shard_create
+    assert "ON CLUSTER '{cluster}'" in distributed_create
     assert "ON CLUSTER" not in local_distributed_create
     assert "UUID" not in shard_create
     assert "UUID" not in distributed_create
@@ -214,7 +214,7 @@ def test_ch_full_table_move_preserves_source_ddl_and_lifecycle(
     assert "PARTITION BY toYYYYMM(dt)" in shard_create
     assert "ORDER BY (dt, id)" in shard_create
     assert "SETTINGS index_granularity = 8192" in shard_create
-    assert "'core'" in distributed_create
+    assert "'{cluster}'" in distributed_create
     assert "'events_target_shard'" in distributed_create
     assert "'events_move_shard'" not in distributed_create
     assert "cityHash64(id)" in distributed_create
@@ -301,7 +301,7 @@ def test_ch_full_table_move_sharding_key_override_replaces_final_distributed_arg
     assert "cityHash64(id)" not in distributed_create
 
 
-def test_ch_full_table_move_adds_inferred_cluster_for_uuid_macro_engine(
+def test_ch_full_table_move_can_infer_cluster_when_override_is_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_client = FakeClickHouseClient(
@@ -314,7 +314,10 @@ def test_ch_full_table_move_adds_inferred_cluster_for_uuid_macro_engine(
         lambda connection_key: fake_client,
     )
 
-    shard_create, distributed_create, local_distributed_create = _run_move(fake_client)
+    shard_create, distributed_create, local_distributed_create = _run_move(
+        fake_client,
+        ch_cluster=None,
+    )
 
     assert "ON CLUSTER core" in shard_create
     assert "ON CLUSTER core" in distributed_create

@@ -22,7 +22,7 @@ def create_sql_table(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
     ch_distributed_table: bool = False,
 ) -> None:
@@ -83,7 +83,7 @@ def build_create_table_sql(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
     ch_distributed_table: bool = False,
 ) -> str:
@@ -111,7 +111,7 @@ def build_create_table_sqls(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
     ch_distributed_table: bool = False,
 ) -> list[str]:
@@ -182,7 +182,7 @@ def build_ch_distributed_create_table_sqls(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
 ) -> list[str]:
     shard_table = build_ch_shard_table_name(table_name)
@@ -197,7 +197,7 @@ def build_ch_distributed_create_table_sqls(
 
     shard_sql = (
         f"CREATE TABLE IF NOT EXISTS {shard_table}\n"
-        f"ON CLUSTER {cluster_name}\n"
+        f"ON CLUSTER {_format_ch_cluster_name(cluster_name)}\n"
         f"({joined_columns})\n"
         f"ENGINE = {engine}\n"
         f"{partition_sql}"
@@ -205,7 +205,7 @@ def build_ch_distributed_create_table_sqls(
     )
     distributed_sql = (
         f"CREATE TABLE IF NOT EXISTS {table_name}\n"
-        f"ON CLUSTER {cluster_name}\n"
+        f"ON CLUSTER {_format_ch_cluster_name(cluster_name)}\n"
         f"({joined_columns})\n"
         "ENGINE = Distributed(\n"
         f"    {_sql_string_literal(cluster_name)},\n"
@@ -326,6 +326,25 @@ def _sql_string_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _format_ch_cluster_name(cluster_name: str) -> str:
+    normalized = cluster_name.strip()
+    if not normalized:
+        return normalized
+    if normalized[0] in {"'", '"', "`"}:
+        return normalized
+    if _is_simple_identifier(normalized):
+        return normalized
+    return _sql_string_literal(normalized)
+
+
+def _is_simple_identifier(identifier: str) -> bool:
+    if not identifier:
+        return False
+    if not (identifier[0].isalpha() or identifier[0] == "_"):
+        return False
+    return all(char.isalnum() or char == "_" for char in identifier)
+
+
 def _execute_ch_command(connection: Any, sql: str) -> None:
     if "ON CLUSTER" not in sql:
         connection.command(sql)
@@ -336,6 +355,7 @@ def _execute_ch_command(connection: Any, sql: str) -> None:
             sql,
             settings={
                 "distributed_ddl_task_timeout": 300,
+                "distributed_ddl_output_mode": "none",
             },
         )
     except TypeError:

@@ -27,7 +27,7 @@ def transfer_table(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     sharding_key: str = "rand()",
 ) -> int:
     options = build_transfer_options(
@@ -126,7 +126,7 @@ def build_transfer_options(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
 ) -> TransferOptions:
     from_config = get_connection_config(from_db)
@@ -222,7 +222,7 @@ def _validate_ch_options_not_used(options: TransferOptions) -> None:
         raise ValueError("ch_order_by can only be used when to_db has type 'ch'.")
     if options.ch_engine != "ReplicatedMergeTree":
         raise ValueError("ch_engine can only be used when to_db has type 'ch'.")
-    if options.ch_cluster != "core":
+    if options.ch_cluster != "{cluster}":
         raise ValueError("ch_cluster can only be used when to_db has type 'ch'.")
     if options.ch_sharding_key != "rand()":
         raise ValueError("sharding_key can only be used when to_db has type 'ch'.")

@@ -132,7 +132,7 @@ def test_build_create_table_sqls_creates_clickhouse_distributed_pair() -> None:
     assert shard_sql.startswith(
         f"CREATE TABLE IF NOT EXISTS {TEST_CH_SHARD_TABLE}"
     )
-    assert "ON CLUSTER core" in shard_sql
+    assert "ON CLUSTER '{cluster}'" in shard_sql
     assert "ENGINE = ReplicatedMergeTree" in shard_sql
     assert "PARTITION BY `month_date`" in shard_sql
     assert "ORDER BY (`month_date`, `min_month_use`)" in shard_sql
@@ -143,7 +143,7 @@ def test_build_create_table_sqls_creates_clickhouse_distributed_pair() -> None:
     assert "`min_month_use` Date" in distributed_sql
     assert "`month_date` Date" in distributed_sql
     assert "ENGINE = Distributed(" in distributed_sql
-    assert "    'core'," in distributed_sql
+    assert "    '{cluster}'," in distributed_sql
     assert "    currentDatabase()," in distributed_sql
     assert f"    '{TEST_CH_SHARD_RELATION}'," in distributed_sql
     assert "    cityHash64(month_date, min_month_use)" in distributed_sql
@@ -186,11 +186,11 @@ def test_load_df_clickhouse_creates_pair_and_loads_distributed_table(monkeypatch
     assert f"DROP TABLE IF EXISTS {TEST_CH_TABLE}" in client.commands
     assert f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE}" in client.commands
     assert (
-        f"DROP TABLE IF EXISTS {TEST_CH_TABLE} ON CLUSTER core"
+        f"DROP TABLE IF EXISTS {TEST_CH_TABLE} ON CLUSTER '{{cluster}}'"
         in client.commands
     )
     assert (
-        f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE} ON CLUSTER core"
+        f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE} ON CLUSTER '{{cluster}}'"
         in client.commands
     )
     assert "SETTINGS index_granularity" not in "\n".join(client.commands)
@@ -200,7 +200,7 @@ def test_load_df_clickhouse_creates_pair_and_loads_distributed_table(monkeypatch
     )
     assert any(
         command.startswith(f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}")
-        and "ON CLUSTER core" in command
+        and "ON CLUSTER '{cluster}'" in command
         for command in client.commands
     )
     assert any(
@@ -238,11 +238,11 @@ def test_finalize_stage_table_clickhouse_recreates_pair_and_inserts_target() -> 
     assert f"DROP TABLE IF EXISTS {TEST_CH_TABLE}" in client.commands
     assert f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE}" in client.commands
     assert (
-        f"DROP TABLE IF EXISTS {TEST_CH_TABLE} ON CLUSTER core"
+        f"DROP TABLE IF EXISTS {TEST_CH_TABLE} ON CLUSTER '{{cluster}}'"
         in client.commands
     )
     assert (
-        f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE} ON CLUSTER core"
+        f"DROP TABLE IF EXISTS {TEST_CH_SHARD_TABLE} ON CLUSTER '{{cluster}}'"
         in client.commands
     )
     assert any(
@@ -251,7 +251,7 @@ def test_finalize_stage_table_clickhouse_recreates_pair_and_inserts_target() -> 
     )
     assert any(
         command.startswith(f"CREATE TABLE IF NOT EXISTS {TEST_CH_TABLE}")
-        and "ON CLUSTER core" in command
+        and "ON CLUSTER '{cluster}'" in command
         for command in client.commands
     )
     assert any(

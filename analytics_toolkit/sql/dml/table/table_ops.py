@@ -84,7 +84,7 @@ def finalize_stage_table(
     ch_partition_by: list[str] | str | None = None,
     ch_order_by: list[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
 ) -> None:
     time_print(
@@ -283,7 +283,7 @@ def drop_table(
 def drop_ch_distributed_table_pair(
     connection: Any,
     table_name: str,
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
 ) -> None:
     shard_table = build_ch_shard_table_name(table_name)
     drop_table("ch", connection, table_name)
@@ -300,7 +300,7 @@ def drop_ch_distributed_table_pair(
 def clear_ch_distributed_table_data(
     connection: Any,
     table_name: str,
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
 ) -> None:
     shard_table = build_ch_shard_table_name(table_name)
     _truncate_ch_table(connection, shard_table, ch_cluster=ch_cluster)
@@ -461,6 +461,7 @@ def _execute_ch_command(connection: Any, sql: str) -> None:
             sql,
             settings={
                 "distributed_ddl_task_timeout": 300,
+                "distributed_ddl_output_mode": "none",
             },
         )
     except TypeError:

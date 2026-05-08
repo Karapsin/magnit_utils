@@ -28,8 +28,15 @@ WHERE amount > 0
 
 
 class FakeClickHouseResult:
-    def __init__(self, result_rows: list[tuple[Any, ...]]) -> None:
+    def __init__(
+        self,
+        result_rows: list[tuple[Any, ...]],
+        column_names: tuple[str, ...] = (),
+        column_types: tuple[Any, ...] = (),
+    ) -> None:
         self.result_rows = result_rows
+        self.column_names = column_names
+        self.column_types = column_types
 
 
 class FakeClickHouseClient:
@@ -49,6 +56,16 @@ class FakeClickHouseClient:
 
     def query(self, sql: str) -> FakeClickHouseResult:
         self.queries.append(sql)
+        if sql.startswith("SELECT *\nFROM (\n"):
+            return FakeClickHouseResult(
+                [],
+                column_names=("dt", "id", "amount"),
+                column_types=(
+                    type("FakeType", (), {"name": "Date"})(),
+                    type("FakeType", (), {"name": "UInt64"})(),
+                    type("FakeType", (), {"name": "Decimal(18, 4)"})(),
+                ),
+            )
         if sql == f"EXISTS TABLE {TARGET_TABLE}":
             return FakeClickHouseResult([(1,)])
         raise AssertionError(f"Unexpected query: {sql}")
@@ -90,14 +107,20 @@ def test_ch_create_table_as_creates_pair_and_inserts_query(
         f"DROP TABLE IF EXISTS {TARGET_TABLE} ON CLUSTER '{{cluster}}'",
         f"DROP TABLE IF EXISTS {TARGET_SHARD_TABLE} ON CLUSTER '{{cluster}}'",
     ]
+    assert fake_client.command_settings[2] == {
+        "distributed_ddl_task_timeout": 300,
+        "distributed_ddl_output_mode": "none",
+    }
     shard_sql, distributed_sql, local_distributed_sql = fake_client.commands[4:7]
     assert shard_sql.startswith(f"CREATE TABLE IF NOT EXISTS {TARGET_SHARD_TABLE}")
     assert "ON CLUSTER '{cluster}'" in shard_sql
     assert "ENGINE = ReplicatedMergeTree" in shard_sql
     assert "PARTITION BY `dt`" in shard_sql
     assert "ORDER BY (`dt`, `id`)" in shard_sql
-    assert "FROM (\n" + QUERY + "\n)" in shard_sql
-    assert "LIMIT 0" in shard_sql
+    assert "`dt` Date" in shard_sql
+    assert "`id` UInt64" in shard_sql
+    assert "`amount` Decimal(18, 4)" in shard_sql
+    assert QUERY not in shard_sql
     assert distributed_sql.startswith(f"CREATE TABLE IF NOT EXISTS {TARGET_TABLE}")
     assert "ON CLUSTER '{cluster}'" in distributed_sql
     assert "ENGINE = Distributed(" in distributed_sql
@@ -105,13 +128,26 @@ def test_ch_create_table_as_creates_pair_and_inserts_query(
     assert "    'default'," in distributed_sql
     assert "    'events_result_shard'," in distributed_sql
     assert "    cityHash64(dt, id)" in distributed_sql
-    assert f"SELECT * FROM {TARGET_SHARD_TABLE} LIMIT 0" in distributed_sql
+    assert "`amount` Decimal(18, 4)" in distributed_sql
+    assert QUERY not in distributed_sql
     assert local_distributed_sql.startswith(
         f"CREATE TABLE IF NOT EXISTS {TARGET_TABLE}"
     )
     assert "ON CLUSTER" not in local_distributed_sql
     assert fake_client.commands[7] == f"INSERT INTO {TARGET_TABLE}\n{QUERY}"
-    assert fake_client.queries == [f"EXISTS TABLE {TARGET_TABLE}"]
+    assert fake_client.command_settings[4] == {
+        "distributed_ddl_task_timeout": 300,
+        "distributed_ddl_output_mode": "none",
+    }
+    assert len(fake_client.queries) == 2
+    assert fake_client.queries[0] == (
+        "SELECT *\n"
+        "FROM (\n"
+        f"{QUERY}\n"
+        ") AS _ch_create_table_as_source\n"
+        "LIMIT 0"
+    )
+    assert fake_client.queries[1] == f"EXISTS TABLE {TARGET_TABLE}"
     assert fake_client.close_calls == 1
 
 

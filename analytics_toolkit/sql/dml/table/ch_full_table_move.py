@@ -50,7 +50,7 @@ def ch_full_table_move(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str | None = None,
-    ch_cluster: str | None = None,
+    ch_cluster: str | None = "{cluster}",
     sharding_key: str | None = None,
 ) -> None:
     config = get_connection_config(db_key)

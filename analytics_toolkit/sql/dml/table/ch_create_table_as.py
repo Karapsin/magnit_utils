@@ -15,6 +15,7 @@ from ...ddl.create_sql_table import (
     _sql_string_literal,
     _wait_for_ch_table,
     build_ch_shard_table_name,
+    quote_identifier,
     split_ch_table_name_for_distributed_engine,
 )
 from analytics_toolkit.general import time_print
@@ -63,9 +64,12 @@ def ch_create_table_as(
             ch_cluster=cluster_name,
         )
 
+        time_print(f"Inferring ClickHouse schema for {target_table}")
+        joined_columns = _infer_ch_query_columns(connection, query_sql)
         shard_sql, distributed_sql, local_distributed_sql = (
             build_ch_create_table_as_sqls(
                 table_name=target_table,
+                joined_columns=joined_columns,
                 query=query_sql,
                 ch_partition_by=ch_partition_by,
                 ch_order_by=ch_order_by,
@@ -93,6 +97,7 @@ def ch_create_table_as(
 
 def build_ch_create_table_as_sqls(
     table_name: str,
+    joined_columns: str,
     query: str,
     *,
     ch_partition_by: Sequence[str] | str | None = None,
@@ -102,7 +107,8 @@ def build_ch_create_table_as_sqls(
     ch_sharding_key: str = "rand()",
 ) -> list[str]:
     target_table = _normalize_non_empty_string(table_name, "table_name")
-    query_sql = _normalize_single_query(query)
+    _normalize_single_query(query)
+    columns_sql = _normalize_non_empty_string(joined_columns, "joined_columns")
     shard_table = build_ch_shard_table_name(target_table)
     cluster_name = _normalize_non_empty_string(ch_cluster, "ch_cluster")
     engine = _normalize_non_empty_string(ch_engine, "ch_engine")
@@ -112,7 +118,6 @@ def build_ch_create_table_as_sqls(
     database_name, shard_relation_name = split_ch_table_name_for_distributed_engine(
         shard_table
     )
-    empty_select_sql = _build_empty_select_sql(query_sql)
     distributed_engine_sql = _build_distributed_engine_sql(
         cluster_name=cluster_name,
         database_name=database_name,
@@ -123,24 +128,21 @@ def build_ch_create_table_as_sqls(
     shard_sql = (
         f"CREATE TABLE IF NOT EXISTS {shard_table}\n"
         f"{_on_cluster_clause_line(cluster_name)}"
+        f"({columns_sql})\n"
         f"ENGINE = {engine}\n"
         f"{partition_sql}"
-        f"{order_by_sql}\n"
-        "AS\n"
-        f"{empty_select_sql}"
+        f"{order_by_sql}"
     )
     distributed_sql = (
         f"CREATE TABLE IF NOT EXISTS {target_table}\n"
         f"{_on_cluster_clause_line(cluster_name)}"
-        f"{distributed_engine_sql}\n"
-        "AS\n"
-        f"SELECT * FROM {shard_table} LIMIT 0"
+        f"({columns_sql})\n"
+        f"{distributed_engine_sql}"
     )
     local_distributed_sql = (
         f"CREATE TABLE IF NOT EXISTS {target_table}\n"
-        f"{distributed_engine_sql}\n"
-        "AS\n"
-        f"SELECT * FROM {shard_table} LIMIT 0"
+        f"({columns_sql})\n"
+        f"{distributed_engine_sql}"
     )
     return [shard_sql, distributed_sql, local_distributed_sql]
 
@@ -179,14 +181,33 @@ def _build_distributed_engine_sql(
     )
 
 
-def _build_empty_select_sql(query: str) -> str:
-    return (
+def _infer_ch_query_columns(connection: Any, query: str) -> str:
+    result = connection.query(
         "SELECT *\n"
         "FROM (\n"
         f"{query}\n"
         ") AS _ch_create_table_as_source\n"
         "LIMIT 0"
     )
+    column_names = list(getattr(result, "column_names", ()) or ())
+    column_types = list(getattr(result, "column_types", ()) or ())
+    if not column_names:
+        raise ValueError("ch_create_table_as query must return at least one column.")
+    if len(column_names) != len(column_types):
+        raise ValueError("Could not infer ClickHouse column types from query result.")
+
+    column_defs = [
+        f"{quote_identifier(str(column_name), 'ch')} {_ch_type_name(column_type)}"
+        for column_name, column_type in zip(column_names, column_types)
+    ]
+    return ", ".join(column_defs)
+
+
+def _ch_type_name(column_type: Any) -> str:
+    type_name = getattr(column_type, "name", None)
+    if type_name is None:
+        type_name = str(column_type)
+    return _normalize_non_empty_string(str(type_name), "column_type")
 
 
 def _build_insert_select_sql(table_name: str, query: str) -> str:

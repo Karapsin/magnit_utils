@@ -41,7 +41,7 @@ def load_df(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     sharding_key: str = "rand()",
 ) -> int:
     if not isinstance(df, pd.DataFrame):
@@ -203,7 +203,7 @@ def _build_load_options(
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
-    ch_cluster: str = "core",
+    ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
 ) -> LoadOptions:
     config = get_connection_config(connection_type)
@@ -374,7 +374,7 @@ def _validate_ch_options_not_used(options: LoadOptions) -> None:
         raise ValueError(
             "ch_engine can only be used when connection_type has type 'ch'."
         )
-    if options.ch_cluster != "core":
+    if options.ch_cluster != "{cluster}":
         raise ValueError(
             "ch_cluster can only be used when connection_type has type 'ch'."
         )
