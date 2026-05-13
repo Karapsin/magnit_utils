@@ -13,6 +13,7 @@ from ...table.table_validation import (
 )
 from ..runtime.models import TransferConnectionRefs, TransferOptions, TransferStageState
 from ..runtime.retry import replace_connection, rollback_quietly, run_with_retry
+from ..schema import get_existing_target_insert_types
 
 
 def finalize_loaded_stage(
@@ -45,6 +46,22 @@ def finalize_loaded_stage(
         target_exists=stage_state.target_exists,
         replace_target_table=options.replace_target_table,
     )
+    if stage_state.stage_column_types is None:
+        stage_state.insert_column_types = None
+        target_column_types = None
+    elif stage_state.target_exists and not options.replace_target_table:
+        stage_state.insert_column_types = get_existing_target_insert_types(
+            options.to_db_backend,
+            connection_refs.target["connection"],
+            options.target_table,
+            stage_state.stage_column_types,
+            connection_key=options.to_db_key,
+        )
+        target_column_types = None
+    else:
+        stage_state.insert_column_types = stage_state.stage_column_types
+        target_column_types = stage_state.stage_column_types
+
     finalize_stage_table(
         options.to_db_backend,
         connection_refs.target["connection"],
@@ -53,6 +70,8 @@ def finalize_loaded_stage(
         replace_target_table=options.replace_target_table,
         target_exists=stage_state.target_exists,
         sample_batch=stage_state.first_non_empty_batch,
+        target_column_types=target_column_types,
+        insert_column_types=stage_state.insert_column_types,
         gp_distributed_by_key=options.gp_distributed_by_key,
         ch_partition_by=options.ch_partition_by,
         ch_order_by=options.ch_order_by,

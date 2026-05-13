@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +18,7 @@ def create_sql_table(
     connection: Any,
     table_name: str,
     batch: pd.DataFrame,
+    column_types: Mapping[str, str] | None = None,
     gp_distributed_by_key: list[str] | None = None,
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
@@ -32,6 +33,7 @@ def create_sql_table(
         backend,
         table_name,
         batch,
+        column_types=column_types,
         gp_distributed_by_key=gp_distributed_by_key,
         ch_partition_by=ch_partition_by,
         ch_order_by=ch_order_by,
@@ -79,6 +81,7 @@ def build_create_table_sql(
     connection_type: str,
     table_name: str,
     batch: pd.DataFrame,
+    column_types: Mapping[str, str] | None = None,
     gp_distributed_by_key: list[str] | None = None,
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
@@ -92,6 +95,7 @@ def build_create_table_sql(
             connection_type,
             table_name,
             batch,
+            column_types=column_types,
             gp_distributed_by_key=gp_distributed_by_key,
             ch_partition_by=ch_partition_by,
             ch_order_by=ch_order_by,
@@ -107,6 +111,7 @@ def build_create_table_sqls(
     connection_type: str,
     table_name: str,
     batch: pd.DataFrame,
+    column_types: Mapping[str, str] | None = None,
     gp_distributed_by_key: list[str] | None = None,
     ch_partition_by: Sequence[str] | str | None = None,
     ch_order_by: Sequence[str] | str | None = None,
@@ -119,7 +124,12 @@ def build_create_table_sqls(
     column_defs = []
     for column_name in batch.columns:
         series = batch[column_name]
-        if backend == "gp":
+        if column_types is not None:
+            db_type = _explicit_column_type(column_types, column_name)
+            column_defs.append(
+                f"{quote_identifier(column_name, backend)} {db_type}"
+            )
+        elif backend == "gp":
             db_type = _infer_gp_type(series)
             column_defs.append(
                 f'{quote_identifier(column_name, backend)} {db_type}'
@@ -174,6 +184,20 @@ def build_create_table_sqls(
             f"CREATE TABLE {table_name} ({joined_columns}) {storage_sql} {distribution_sql}"
         ]
     return [f"CREATE TABLE {table_name} ({joined_columns})"]
+
+
+def _explicit_column_type(
+    column_types: Mapping[str, str],
+    column_name: str,
+) -> str:
+    try:
+        db_type = column_types[column_name]
+    except KeyError as exc:
+        raise ValueError(f"Missing explicit SQL type for column {column_name!r}.") from exc
+    normalized = db_type.strip()
+    if not normalized:
+        raise ValueError(f"SQL type for column {column_name!r} must not be empty.")
+    return normalized
 
 
 def build_ch_distributed_create_table_sqls(

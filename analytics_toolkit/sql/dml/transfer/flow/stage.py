@@ -52,11 +52,12 @@ def initialize_stage_for_first_batch(
         connection=connection_refs.target["connection"],
         target_table=options.target_table,
         batch=batch,
+        column_types=stage_state.stage_column_types,
         gp_distributed_by_key=options.gp_distributed_by_key,
         connection_key=options.to_db_key,
     )
     stage_state.stage_table_created = True
-    if options.to_db_backend == "trino":
+    if options.to_db_backend == "trino" and stage_state.stage_column_types is None:
         stage_state.stage_column_types = get_trino_table_column_types(
             connection_refs.target["connection"],
             stage_state.stage_table,

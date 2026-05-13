@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
@@ -21,6 +22,7 @@ def create_stage_table(
     connection: Any,
     target_table: str,
     batch: pd.DataFrame,
+    column_types: Mapping[str, str] | None = None,
     gp_distributed_by_key: list[str] | None = None,
     connection_key: str | None = None,
 ) -> str:
@@ -43,6 +45,7 @@ def create_stage_table(
             connection,
             stage_table,
             batch,
+            column_types=column_types,
             gp_distributed_by_key=gp_distributed_by_key,
         )
         return stage_table

@@ -35,7 +35,9 @@ class TransferStageState:
     target_exists: bool
     stage_table_created: bool = False
     first_non_empty_batch: pd.DataFrame | None = None
+    source_column_types: dict[str, str | None] | None = None
     stage_column_types: dict[str, str] | None = None
+    insert_column_types: dict[str, str] | None = None
     stage_table: str | None = None
 
 

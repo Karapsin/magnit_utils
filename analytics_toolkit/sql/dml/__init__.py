@@ -1,10 +1,11 @@
 from .io.execute_sql import execute_sql
 from .io.read_sql import read_sql
 from .load.load_df import load_df
-from .table import gp_vacuum
+from .table import create_table_from_sql, gp_vacuum
 from .transfer.flow.api import transfer_table
 
 __all__ = [
+    "create_table_from_sql",
     "execute_sql",
     "gp_vacuum",
     "load_df",

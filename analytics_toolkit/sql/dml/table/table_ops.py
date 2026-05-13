@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
@@ -10,7 +11,11 @@ from ...connection.config import (
     resolve_connection_backend,
 )
 from ...connection.get_sql_connection import get_sql_connection
-from ...ddl.create_sql_table import build_ch_shard_table_name, create_sql_table
+from ...ddl.create_sql_table import (
+    build_ch_shard_table_name,
+    column_list_sql,
+    create_sql_table,
+)
 from ...ddl.create_sql_table import quote_identifier
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
 from analytics_toolkit.general import time_print
@@ -80,6 +85,8 @@ def finalize_stage_table(
     replace_target_table: bool,
     target_exists: bool,
     sample_batch: pd.DataFrame,
+    target_column_types: Mapping[str, str] | None = None,
+    insert_column_types: Mapping[str, str] | None = None,
     gp_distributed_by_key: list[str] | None = None,
     ch_partition_by: list[str] | str | None = None,
     ch_order_by: list[str] | str | None = None,
@@ -106,6 +113,7 @@ def finalize_stage_table(
                 connection,
                 target_table,
                 sample_batch,
+                column_types=target_column_types,
                 gp_distributed_by_key=gp_distributed_by_key,
                 ch_partition_by=ch_partition_by,
                 ch_order_by=ch_order_by,
@@ -114,7 +122,13 @@ def finalize_stage_table(
                 ch_sharding_key=ch_sharding_key,
                 ch_distributed_table=True,
             )
-        insert_from_table(backend, connection, target_table, stage_table)
+        insert_from_table(
+            backend,
+            connection,
+            target_table,
+            stage_table,
+            column_types=insert_column_types,
+        )
         return
 
     if not target_exists:
@@ -123,12 +137,19 @@ def finalize_stage_table(
             connection,
             target_table,
             sample_batch,
+            column_types=target_column_types,
             gp_distributed_by_key=gp_distributed_by_key,
         )
     elif replace_target_table:
         clear_target_table(backend, connection, target_table)
 
-    insert_from_table(backend, connection, target_table, stage_table)
+    insert_from_table(
+        backend,
+        connection,
+        target_table,
+        stage_table,
+        column_types=insert_column_types,
+    )
 
 
 def analyze_table(
@@ -337,14 +358,126 @@ def get_trino_table_column_types(
         cursor.close()
 
 
+def get_table_column_types(
+    connection_type: str,
+    connection: Any,
+    table_name: str,
+    connection_key: str | None = None,
+) -> dict[str, str]:
+    backend = resolve_connection_backend(connection_type)
+    if backend == "gp":
+        return _get_gp_table_column_types(connection, table_name)
+    if backend == "trino":
+        return get_trino_table_column_types(
+            connection,
+            table_name,
+            connection_key=connection_key or connection_type,
+        )
+    if backend == "ch":
+        return _get_ch_table_column_types(connection, table_name)
+    raise UnsupportedConnectionTypeError(
+        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+    )
+
+
+def _get_gp_table_column_types(connection: Any, table_name: str) -> dict[str, str]:
+    schema_name, relation_name = _split_gp_table_name(table_name)
+    cursor = connection.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT column_name, data_type, udt_name, numeric_precision, numeric_scale
+            FROM information_schema.columns
+            WHERE table_schema = %s
+              AND table_name = %s
+            ORDER BY ordinal_position
+            """.strip(),
+            (schema_name, relation_name),
+        )
+        return {
+            str(column_name): _format_gp_information_schema_type(
+                str(data_type),
+                udt_name,
+                numeric_precision,
+                numeric_scale,
+            )
+            for (
+                column_name,
+                data_type,
+                udt_name,
+                numeric_precision,
+                numeric_scale,
+            ) in cursor.fetchall()
+        }
+    finally:
+        cursor.close()
+
+
+def _split_gp_table_name(table_name: str) -> tuple[str, str]:
+    parts = [part.strip().strip('"') for part in table_name.split(".") if part.strip()]
+    if len(parts) == 1:
+        return "public", parts[0]
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    raise ValueError(f"Invalid Greenplum table name: {table_name}")
+
+
+def _format_gp_information_schema_type(
+    data_type: str,
+    udt_name: Any,
+    numeric_precision: Any,
+    numeric_scale: Any,
+) -> str:
+    normalized = data_type.lower()
+    if normalized == "numeric" and numeric_precision is not None:
+        if numeric_scale is None:
+            return f"NUMERIC({numeric_precision})"
+        return f"NUMERIC({numeric_precision}, {numeric_scale})"
+    if normalized == "character varying":
+        return "VARCHAR"
+    if normalized == "timestamp without time zone":
+        return "TIMESTAMP"
+    if normalized == "timestamp with time zone":
+        return "TIMESTAMP WITH TIME ZONE"
+    if normalized == "integer":
+        return "INTEGER"
+    if normalized == "bigint":
+        return "BIGINT"
+    if normalized == "smallint":
+        return "SMALLINT"
+    if normalized == "boolean":
+        return "BOOLEAN"
+    if normalized == "date":
+        return "DATE"
+    if normalized == "text":
+        return "TEXT"
+    return str(udt_name or data_type).upper()
+
+
+def _get_ch_table_column_types(connection: Any, table_name: str) -> dict[str, str]:
+    result = connection.query(f"DESCRIBE TABLE {table_name}")
+    rows = getattr(result, "result_rows", None) or []
+    return {
+        str(row[0]): str(row[1])
+        for row in rows
+        if len(row) >= 2
+    }
+
+
 def insert_from_table(
     connection_type: str,
     connection: Any,
     target_table: str,
     source_table: str,
+    column_types: Mapping[str, str] | None = None,
 ) -> None:
-    sql = f"INSERT INTO {target_table} SELECT * FROM {source_table}"
     backend = resolve_connection_backend(connection_type)
+    sql = _build_insert_from_table_sql(
+        backend,
+        target_table,
+        source_table,
+        column_types,
+    )
 
     if backend == "gp":
         cursor = connection.cursor()
@@ -373,6 +506,162 @@ def insert_from_table(
     raise UnsupportedConnectionTypeError(
         "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
     )
+
+
+def insert_from_query(
+    connection_type: str,
+    connection: Any,
+    target_table: str,
+    source_sql: str,
+    column_types: Mapping[str, str],
+) -> int:
+    backend = resolve_connection_backend(connection_type)
+    sql = build_insert_from_query_sql(
+        backend,
+        target_table,
+        source_sql,
+        column_types,
+    )
+
+    if backend == "gp":
+        cursor = connection.cursor()
+        try:
+            cursor.execute(sql)
+            row_count = _extract_row_count(cursor)
+            connection.commit()
+            return row_count
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
+
+    if backend == "trino":
+        cursor = connection.cursor()
+        try:
+            cursor.execute(sql)
+            return _extract_row_count(cursor)
+        finally:
+            cursor.close()
+
+    if backend == "ch":
+        result = connection.command(sql)
+        return _extract_row_count(result)
+
+    raise UnsupportedConnectionTypeError(
+        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+    )
+
+
+def build_insert_from_query_sql(
+    connection_type: str,
+    target_table: str,
+    source_sql: str,
+    column_types: Mapping[str, str],
+) -> str:
+    backend = resolve_connection_backend(connection_type)
+    query_sql = source_sql.strip().removesuffix(";").strip()
+    return _build_typed_insert_select_sql(
+        backend,
+        target_table,
+        f"FROM ({query_sql}) AS source_query",
+        column_types,
+    )
+
+
+def _build_insert_from_table_sql(
+    connection_type: str,
+    target_table: str,
+    source_table: str,
+    column_types: Mapping[str, str] | None,
+) -> str:
+    if not column_types:
+        return f"INSERT INTO {target_table} SELECT * FROM {source_table}"
+
+    return _build_typed_insert_select_sql(
+        connection_type,
+        target_table,
+        f"FROM {source_table}",
+        column_types,
+    )
+
+
+def _build_typed_insert_select_sql(
+    connection_type: str,
+    target_table: str,
+    from_sql: str,
+    column_types: Mapping[str, str],
+) -> str:
+    columns = list(column_types)
+    target_columns = column_list_sql(columns, connection_type)
+    select_columns = ", ".join(
+        _cast_select_expression(connection_type, column_name, target_type)
+        for column_name, target_type in column_types.items()
+    )
+    return (
+        f"INSERT INTO {target_table} ({target_columns}) "
+        f"SELECT {select_columns} {from_sql}"
+    )
+
+
+def _cast_select_expression(
+    connection_type: str,
+    column_name: str,
+    target_type: str,
+) -> str:
+    quoted_column = quote_identifier(column_name, connection_type)
+    return f"CAST({quoted_column} AS {target_type}) AS {quoted_column}"
+
+
+def _extract_row_count(executed: Any) -> int:
+    row_count = _coerce_row_count(getattr(executed, "rowcount", None))
+    if row_count is not None:
+        return row_count
+
+    if isinstance(executed, Mapping):
+        row_count = _extract_row_count_from_mapping(executed)
+        if row_count is not None:
+            return row_count
+
+    summary = getattr(executed, "summary", None)
+    if isinstance(summary, Mapping):
+        row_count = _extract_row_count_from_mapping(summary)
+        if row_count is not None:
+            return row_count
+
+    for attribute in ("written_rows", "writtenRows", "processed_rows", "rows"):
+        row_count = _coerce_row_count(getattr(executed, attribute, None))
+        if row_count is not None:
+            return row_count
+
+    return 0
+
+
+def _extract_row_count_from_mapping(value: Mapping[str, Any]) -> int | None:
+    for key in (
+        "rowcount",
+        "row_count",
+        "written_rows",
+        "writtenRows",
+        "processedRows",
+        "rows",
+    ):
+        row_count = _coerce_row_count(value.get(key))
+        if row_count is not None:
+            return row_count
+    return None
+
+
+def _coerce_row_count(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        row_count = int(value)
+    except (TypeError, ValueError):
+        return None
+    if row_count < 0:
+        return None
+    return row_count
 
 
 def split_trino_table_name(

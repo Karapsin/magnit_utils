@@ -107,6 +107,28 @@ def test_build_create_table_sql_uses_float64_for_decimal_clickhouse_columns() ->
     assert "`label` Nullable(String)" in sql
 
 
+def test_build_create_table_sql_uses_explicit_column_types() -> None:
+    batch = pd.DataFrame(
+        {
+            "amount": ["1.20"],
+            "created_at": ["2024-01-01"],
+        }
+    )
+
+    sql = create_sql_table_module.build_create_table_sql(
+        connection_type="gp",
+        table_name="schema.stage_table",
+        batch=batch,
+        column_types={
+            "amount": "NUMERIC(12, 2)",
+            "created_at": "TIMESTAMP",
+        },
+    )
+
+    assert '"amount" NUMERIC(12, 2)' in sql
+    assert '"created_at" TIMESTAMP' in sql
+
+
 def test_build_create_table_sqls_creates_clickhouse_distributed_pair() -> None:
     batch = pd.DataFrame(
         {
@@ -262,4 +284,42 @@ def test_finalize_stage_table_clickhouse_recreates_pair_and_inserts_target() -> 
     assert client.commands[-1] == (
         f"INSERT INTO {TEST_CH_TABLE} "
         f"SELECT * FROM {TEST_CH_STAGE_TABLE}"
+    )
+
+
+def test_finalize_stage_table_clickhouse_uses_explicit_types_and_casts_insert() -> None:
+    client = FakeClickHouseClient()
+    batch = pd.DataFrame(
+        {
+            "month_date": ["2024-02-01"],
+            "users": ["10"],
+        }
+    )
+    column_types = {
+        "month_date": "Nullable(Date)",
+        "users": "Nullable(Int64)",
+    }
+
+    table_ops_module.finalize_stage_table(
+        connection_type="ch",
+        connection=client,
+        stage_table=TEST_CH_STAGE_TABLE,
+        target_table=TEST_CH_TABLE,
+        replace_target_table=True,
+        target_exists=True,
+        sample_batch=batch,
+        target_column_types=column_types,
+        insert_column_types=column_types,
+        ch_partition_by=["month_date"],
+        ch_order_by=["month_date"],
+    )
+
+    create_sql = "\n".join(client.commands)
+    assert "`month_date` Nullable(Date)" in create_sql
+    assert "`users` Nullable(Int64)" in create_sql
+    assert client.commands[-1] == (
+        f"INSERT INTO {TEST_CH_TABLE} (`month_date`, `users`) "
+        f"SELECT CAST(`month_date` AS Nullable(Date)) AS `month_date`, "
+        f"CAST(`users` AS Nullable(Int64)) AS `users` "
+        f"FROM {TEST_CH_STAGE_TABLE}"
     )

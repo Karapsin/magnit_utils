@@ -7,6 +7,7 @@ from .finalize import cleanup_stage, finalize_loaded_stage
 from ..runtime.models import TransferConnectionRefs, TransferOptions, TransferStageState
 from ..runtime.retry import close_connection_ref, run_with_retry
 from ..io.source import iter_source_batches
+from ..schema import inspect_source_query_schema, map_source_schema_to_target
 from .stage import create_stage_state, initialize_stage_for_first_batch
 
 
@@ -25,6 +26,19 @@ def run_transfer_attempt(
     stage_state = create_stage_state(options, connection_refs)
 
     try:
+        source_schema = inspect_source_query_schema(
+            options.from_db_backend,
+            connection_refs.source["connection"],
+            options.source_sql,
+        )
+        stage_state.source_column_types = {
+            column.name: column.native_type for column in source_schema
+        }
+        if source_schema:
+            stage_state.stage_column_types = map_source_schema_to_target(
+                source_schema,
+                options.to_db_backend,
+            )
         total_rows = load_stage_batches(
             options=options,
             connection_refs=connection_refs,

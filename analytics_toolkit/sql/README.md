@@ -14,9 +14,17 @@ from analytics_toolkit import sql
 sql.read(..., retry_cnt=5, timeout_increment=5)
 sql.execute(..., retry_cnt=5, timeout_increment=5)
 sql.execute_read(..., retry_cnt=5, timeout_increment=5)
+sql.async_sql(
+    ...,
+    concurrency=5,
+    fail_fast=True,
+    soft_concurrency_cap=None,
+    hard_concurrency_cap=10,
+)
 sql.gp_vacuum(...)
 sql.create_sql_table(...)
 sql.ch_create_table_as(...)
+sql.create_table_from_sql(...)
 sql.load_df(..., retry_cnt=5, timeout_increment=5)
 sql.transfer(..., trino_insert_chunk_size=1000)
 sql.ch_full_table_move(...)
@@ -29,10 +37,14 @@ sql.get_sql_connection(...)
 - `execute_sql` / `execute`: run SQL statements without returning a dataframe
 - `execute_read`: run setup SQL statements and return the final statement as a
   dataframe
+- `async_sql`: run a named batch of independent SQL tasks or custom pipelines
+  concurrently through the existing sync APIs
 - `gp_vacuum`: run Greenplum `VACUUM` outside a transaction block
 - `create_sql_table`: build and execute `CREATE TABLE` statements
 - `ch_create_table_as`: recreate a ClickHouse distributed/shard table pair
   from a query result
+- `create_table_from_sql`: create a table from a source query's native column
+  metadata, optionally inserting the query result
 - `load_df`: load a pandas dataframe into a SQL table
 - `transfer_table` / `transfer`: move data between supported backends
 - `ch_full_table_move`: recreate a ClickHouse distributed/shard table pair
@@ -48,18 +60,218 @@ operation from the beginning with a fresh connection.
 the provided SQL into statements, executes every statement except the last, then
 reads the last statement into a pandas dataframe on the same connection.
 
+`async_sql` accepts a non-empty mapping of task name to task spec. Each spec
+declares a `type` (`read`, `execute`, `execute_read`, `load_df`, `transfer`, or
+`custom_sql_pipeline`). SQL task specs pass the same keyword arguments as the
+matching sync function. It uses `asyncio.to_thread`, so sync work runs
+concurrently with fresh operations; it does not parallelize an individual SQL
+statement internally. Result keys follow the input task order. With
+`fail_fast=True`, the first raised task exception is raised and pending awaits
+are cancelled; already-running sync work can continue until that function exits.
+With `fail_fast=False`, exceptions are returned under their task names.
+
+`soft_concurrency_cap` limits actual sync worker execution across nested
+`async_sql` calls in the same async task chain. When omitted on a top-level call,
+it defaults to that call's `concurrency`. Nested calls inherit the active soft
+cap unless they pass a lower `soft_concurrency_cap` for that subtree.
+`hard_concurrency_cap` defaults to `10` and rejects calls only when actual
+possible worker execution after soft throttling would exceed the hard cap.
+Lowering `soft_concurrency_cap` is therefore a valid way to run a large requested
+batch without exceeding the hard cap.
+
+```python
+import asyncio
+
+import pandas as pd
+from analytics_toolkit import sql
+
+result = asyncio.run(
+    sql.async_sql(
+        {
+            "users": {
+                "type": "read",
+                "connection_type": "gp",
+                "query": "select user_id, segment from sandbox.users",
+                "print_queries": False,
+            },
+            "refresh_summary": {
+                "type": "execute",
+                "connection_type": "gp",
+                "query": "truncate table sandbox.summary",
+                "gp_break_query": True,
+            },
+            "load_scores": {
+                "type": "load_df",
+                "connection_type": "ch",
+                "destination_table": "sandbox.scores",
+                "df": pd.DataFrame({"user_id": [1], "score": [10]}),
+                "append": False,
+                "ch_order_by": ["user_id"],
+            },
+            "copy_events": {
+                "type": "transfer",
+                "from_db": "trino",
+                "to_db": "gp_sandbox",
+                "from_sql": "select * from iceberg.events.daily",
+                "to_table": "sandbox.events_daily",
+                "batch_size": 50_000,
+            },
+        },
+        concurrency=3,
+    )
+)
+
+users_df = result["users"]
+loaded_rows = result["load_scores"]
+transferred_rows = result["copy_events"]
+```
+
+Use `custom_sql_pipeline` for ordered Python steps that should run sequentially
+inside one task while other tasks continue under the outer concurrency limit.
+Each step is called as `step(context)`. The context exposes `task_name`,
+`step_index`, `results`, and `last_result`. Sync steps run in a worker thread;
+async steps are awaited directly. A pipeline returns the final step result.
+
+```python
+def read_row_count(context):
+    return sql.read(
+        "gp",
+        "select count(*) as row_count from sandbox.source_table",
+        print_queries=False,
+    )
+
+
+def transfer_if_not_empty(context):
+    row_count = int(context.last_result["row_count"].iloc[0])
+    if row_count == 0:
+        return 0
+
+    return sql.transfer(
+        from_db="gp",
+        to_db="ch",
+        from_sql="select * from sandbox.source_table",
+        to_table="sandbox.source_table_copy",
+        ch_order_by=["id"],
+    )
+
+
+result = asyncio.run(
+    sql.async_sql(
+        {
+            "source_copy": {
+                "type": "custom_sql_pipeline",
+                "steps": [read_row_count, transfer_if_not_empty],
+            }
+        },
+        concurrency=3,
+    )
+)
+```
+
+Async pipeline steps can launch nested batches. The nested call below requests
+two-way concurrency and inherits the outer soft cap:
+
+```python
+async def load_parts_in_parallel(context):
+    return await sql.async_sql(
+        {
+            "load_a": {
+                "type": "load_df",
+                "connection_type": "gp",
+                "destination_table": "sandbox.part_a",
+                "df": df_a,
+            },
+            "load_b": {
+                "type": "load_df",
+                "connection_type": "gp",
+                "destination_table": "sandbox.part_b",
+                "df": df_b,
+            },
+        },
+        concurrency=2,
+    )
+
+
+def finalize_parts(context):
+    return sql.execute(
+        "gp",
+        """
+        create table sandbox.final_parts as
+        select * from sandbox.part_a
+        union all
+        select * from sandbox.part_b
+        """,
+        print_queries=False,
+    )
+```
+
+For larger nested batches, requested concurrency can exceed the hard cap as long
+as the soft cap keeps actual sync worker execution within the hard cap. This
+runs successfully because the outer soft cap defaults to `concurrency=2`, even
+though each nested batch requests `concurrency=6`:
+
+```python
+async def load_many_parts(context):
+    return await sql.async_sql(many_load_tasks, concurrency=6)
+
+
+result = asyncio.run(
+    sql.async_sql(
+        {
+            "parts_a": {
+                "type": "custom_sql_pipeline",
+                "steps": [load_many_parts, finalize_parts],
+            },
+            "parts_b": {
+                "type": "custom_sql_pipeline",
+                "steps": [load_many_parts, finalize_parts],
+            },
+        },
+        concurrency=2,
+        hard_concurrency_cap=10,
+    )
+)
+```
+
+For a single large top-level batch, set an explicit soft cap below the hard cap:
+
+```python
+result = asyncio.run(
+    sql.async_sql(
+        many_load_tasks,
+        concurrency=20,
+        soft_concurrency_cap=5,
+        hard_concurrency_cap=10,
+    )
+)
+```
+
 For Trino targets, `load_df` and `transfer_table` also accept
 `trino_insert_chunk_size` to control how many rows are sent in each
 parameterized multi-row insert statement. If omitted, the package falls back to
 the target Trino connection's `insert_chunk_size`, then to the internal default.
 
-For ClickHouse targets, `load_df` and `transfer_table` create a local
-`<target>_shard` table first and then create the requested target as a
-`Distributed` table. Use `ch_partition_by`, `ch_order_by`, `ch_engine`,
-`ch_cluster`, and `sharding_key` to control the shard DDL and distributed
-sharding expression. The default `ch_cluster` is the ClickHouse `{cluster}`
-macro so created distributed/shard table pairs are visible across the full
-cluster on Yandex Managed ClickHouse.
+`transfer_table` reads native source query column types before loading data.
+Stage and newly created target tables use the closest matching target backend
+types instead of pandas-inferred batch types. Final stage-to-target inserts use
+explicit column lists and cast staged columns to the target types. When
+`replace_target_table=False` and the target already exists, the existing target
+column types are used for those final casts.
+
+`create_table_from_sql` uses the same native metadata mapping to create an
+empty target table by default. Pass `insert_data=True` to insert the source
+query result after creation. Existing targets are preserved by default; pass
+`drop_target_if_exists=True` to drop the target first. When `table_db` is
+omitted, the table is created on `source_db`. Cross-backend inserts delegate to
+`transfer_table` with `replace_target_table=False` after the target is created.
+
+For ClickHouse targets, `load_df`, `transfer_table`, and
+`create_table_from_sql` create a local `<target>_shard` table first and then
+create the requested target as a `Distributed` table. Use `ch_partition_by`,
+`ch_order_by`, `ch_engine`, `ch_cluster`, and `sharding_key` to control the
+shard DDL and distributed sharding expression. The default `ch_cluster` is the
+ClickHouse `{cluster}` macro so created distributed/shard table pairs are
+visible across the full cluster on Yandex Managed ClickHouse.
 
 `ch_create_table_as` is ClickHouse-only. It drops any existing target
 distributed/shard table pair, creates a new `<target>_shard` table from the

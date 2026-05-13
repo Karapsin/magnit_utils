@@ -30,7 +30,10 @@ class FakeResult:
 class FakeSourceCursor:
     def __init__(self, rows: list[tuple[Any, ...]]) -> None:
         self._rows = rows
-        self.description = [("month_date",), ("users",)]
+        self.description = [
+            ("month_date", 1082, None, None, None, None),
+            ("users", 20, None, None, None, None),
+        ]
         self.executed_queries: list[str] = []
         self.close_calls = 0
 
@@ -161,8 +164,19 @@ def test_transfer_table_clickhouse_target_creates_distributed_table_on_cluster(
     ]
     assert len(cluster_distributed_creates) == 1
     assert "ENGINE = Distributed(" in cluster_distributed_creates[0]
+    assert "`month_date` Nullable(Date)" in cluster_distributed_creates[0]
+    assert "`users` Nullable(Int64)" in cluster_distributed_creates[0]
     assert "    '{cluster}'," in cluster_distributed_creates[0]
     assert f"    '{TARGET_SHARD_TABLE}'," in cluster_distributed_creates[0]
+    assert any(
+        command.startswith(
+            f"INSERT INTO {TARGET_TABLE} (`month_date`, `users`) "
+            "SELECT CAST(`month_date` AS Nullable(Date)) AS `month_date`, "
+            "CAST(`users` AS Nullable(Int64)) AS `users` "
+            "FROM test_transfer_target__stage__"
+        )
+        for command in target.commands
+    )
 
     assert (
         f"DROP TABLE IF EXISTS {TARGET_TABLE} ON CLUSTER '{{cluster}}'"
