@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from analytics_toolkit.general import time_print
+
 from .bootstrap import _apply_multiple_comparisons_adjustment
 from .constants import DEFAULT_ALPHA, DEFAULT_POWER
 from .cuped import _compute_cuped_statistics
@@ -45,6 +47,17 @@ def compute_test_metrics(
       on the observed sample variances.
     - Ratio metrics can be passed through `ratio_metrics`.
     """
+
+    initial_metric_column_count = len(
+        [column for column in df.columns if column not in {group, user_id}]
+    )
+    time_print(
+        "compute_test_metrics: start "
+        f"rows={len(df)} metric_columns={initial_metric_column_count} "
+        f"ratio_metrics={bool(ratio_metrics)} "
+        f"cuped={pre_exp_metrics_df is not None} "
+        f"bootstrap={bool(multiple_comparisons_adjustment)}"
+    )
 
     _validate_input_columns(df, group=group, user_id=user_id)
     _validate_mde_parameters(mde_alpha=mde_alpha, mde_power=mde_power)
@@ -91,6 +104,13 @@ def compute_test_metrics(
     ratio_specs = _normalize_ratio_metrics(df, ratio_metrics, reserved_columns={group, user_id})
     comparisons = _build_comparisons(group_names, control, test_vs_test=test_vs_test)
     metric_definitions = _build_metric_definitions(metric_columns, ratio_specs)
+    time_print(
+        "compute_test_metrics: setup complete "
+        f"groups={len(group_names)} comparisons={len(comparisons)} "
+        f"metrics={len(metric_definitions)}"
+    )
+
+    time_print("compute_test_metrics: building outlier contexts")
     for metric_definition in metric_definitions:
         metric_definition["_outlier_context"] = _build_outlier_context(
             df=df,
@@ -106,10 +126,15 @@ def compute_test_metrics(
                 outliers_policy=normalized_outliers_policy,
                 allow_missing=True,
             )
+    time_print("compute_test_metrics: outlier contexts complete")
 
     rows: list[dict[str, object]] = []
     for test_group, baseline_group in comparisons:
+        time_print(f"compute_test_metrics: comparison {test_group} vs {baseline_group}")
         for metric_definition in metric_definitions:
+            metric_name = str(metric_definition["metric_key"])
+            metric_type = str(metric_definition["kind"])
+            time_print(f"compute_test_metrics: metric {metric_name} ({metric_type})")
             outlier_context = metric_definition.get("_outlier_context")
             row = _build_metric_row(
                 df=df,
@@ -123,6 +148,7 @@ def compute_test_metrics(
             )
             row["_comparison_key"] = (test_group, baseline_group)
             if pre_exp_metrics_df is not None:
+                time_print(f"compute_test_metrics: CUPED {metric_name} ({metric_type})")
                 row["p-value CUPED"], row["s.e. CUPED"] = _compute_cuped_statistics(
                     df=df,
                     pre_exp_metrics_df=pre_exp_metrics_df,
@@ -146,6 +172,11 @@ def compute_test_metrics(
             rows.append(row)
 
     if multiple_comparisons_adjustment:
+        time_print(
+            "compute_test_metrics: bootstrap adjustment start "
+            f"resamples={multiple_comparisons_adjustment_resamples} "
+            f"n_jobs={bootstrap_n_jobs}"
+        )
         _apply_multiple_comparisons_adjustment(
             rows=rows,
             df=df,
@@ -157,6 +188,7 @@ def compute_test_metrics(
             n_jobs=bootstrap_n_jobs,
             show_progress=bootstrap_progress,
         )
+        time_print("compute_test_metrics: bootstrap adjustment complete")
 
     columns = [
         "metric_name",
@@ -192,4 +224,6 @@ def compute_test_metrics(
         row.pop("_metric_key", None)
         row.pop("_test_stat", None)
 
-    return pd.DataFrame(rows, columns=columns)
+    result = pd.DataFrame(rows, columns=columns)
+    time_print(f"compute_test_metrics: finish rows={len(result)}")
+    return result

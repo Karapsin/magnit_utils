@@ -206,6 +206,56 @@ def _legacy_bootstrap_adjustment(
     return pd.DataFrame(rows, columns=columns)
 
 
+def test_compute_test_metrics_prints_progress_logs(capsys: pytest.CaptureFixture[str]) -> None:
+    df = pd.DataFrame(
+        {
+            "user_id": list(range(1, 9)),
+            "group_name": ["control"] * 4 + ["test"] * 4,
+            "orders": [10, 11, 9, 12, 14, 15, 13, 16],
+            "clicks": [5, 6, 4, 5, 8, 9, 7, 8],
+            "impressions": [10, 12, 8, 10, 12, 14, 10, 12],
+        }
+    )
+    pre_df = pd.DataFrame(
+        {
+            "user_id": list(range(1, 9)),
+            "group_name": ["control"] * 4 + ["test"] * 4,
+            "orders": [8, 10, 6, 11, 12, 12, 10, 15],
+            "clicks": [4, 5, 3, 4, 6, 7, 5, 6],
+            "impressions": [9, 11, 8, 10, 11, 15, 9, 13],
+        }
+    )
+
+    result = compute_test_metrics(
+        df,
+        ratio_metrics=[
+            {"name": "ctr", "numerator": "clicks", "denominator": "impressions"},
+        ],
+        test_vs_test=False,
+        multiple_comparisons_adjustment=True,
+        multiple_comparisons_adjustment_resamples=3,
+        bootstrap_progress=False,
+        pre_exp_metrics_df=pre_df,
+    )
+
+    output = capsys.readouterr().out
+    assert "compute_test_metrics: start rows=8 metric_columns=3" in output
+    assert "ratio_metrics=True cuped=True bootstrap=True" in output
+    assert "compute_test_metrics: setup complete groups=2 comparisons=1 metrics=4" in output
+    assert "compute_test_metrics: building outlier contexts" in output
+    assert "compute_test_metrics: outlier contexts complete" in output
+    assert "compute_test_metrics: comparison test vs control" in output
+    assert "compute_test_metrics: metric orders (mean)" in output
+    assert "compute_test_metrics: metric ctr (ratio)" in output
+    assert "compute_test_metrics: CUPED orders (mean)" in output
+    assert (
+        "compute_test_metrics: bootstrap adjustment start resamples=3 n_jobs=1"
+        in output
+    )
+    assert "compute_test_metrics: bootstrap adjustment complete" in output
+    assert f"compute_test_metrics: finish rows={len(result)}" in output
+
+
 def test_compute_test_metrics_matches_legacy_bootstrap_adjustment_single_thread() -> None:
     df = _build_sample_metrics_df()
     ratio_metrics = [
