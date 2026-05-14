@@ -3,9 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from ...connection.config import resolve_connection_backend
-from ...ddl.create_sql_table import column_list_sql, quote_identifier
-from ...connection.errors import UnsupportedConnectionTypeError
+from ...backend_adapters import get_backend_adapter
 from analytics_toolkit.general import time_print
 
 
@@ -92,29 +90,10 @@ def _stage_has_duplicate_keys(
     stage_table: str,
     key_columns: Sequence[str],
 ) -> bool:
-    backend = resolve_connection_backend(connection_type)
-    key_sql = column_list_sql(key_columns, connection_type)
-    query = (
-        f"SELECT 1 FROM {stage_table} "
-        f"GROUP BY {key_sql} "
-        "HAVING COUNT(*) > 1 "
-        "LIMIT 1"
-    )
-
-    if backend in {"gp", "trino"}:
-        cursor = connection.cursor()
-        try:
-            cursor.execute(query)
-            return cursor.fetchone() is not None
-        finally:
-            cursor.close()
-
-    if backend == "ch":
-        result = connection.query(query)
-        return bool(result.result_rows)
-
-    raise UnsupportedConnectionTypeError(
-        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+    return get_backend_adapter(connection_type).stage_has_duplicate_keys(
+        connection,
+        stage_table,
+        key_columns,
     )
 
 
@@ -125,32 +104,11 @@ def _stage_keys_overlap_target(
     target_table: str,
     key_columns: Sequence[str],
 ) -> bool:
-    backend = resolve_connection_backend(connection_type)
-    join_condition = " AND ".join(
-        _null_safe_key_equality(connection_type, "stage_src", "target_dst", column_name)
-        for column_name in key_columns
-    )
-    query = (
-        "SELECT 1 "
-        f"FROM {stage_table} AS stage_src "
-        f"INNER JOIN {target_table} AS target_dst ON {join_condition} "
-        "LIMIT 1"
-    )
-
-    if backend in {"gp", "trino"}:
-        cursor = connection.cursor()
-        try:
-            cursor.execute(query)
-            return cursor.fetchone() is not None
-        finally:
-            cursor.close()
-
-    if backend == "ch":
-        result = connection.query(query)
-        return bool(result.result_rows)
-
-    raise UnsupportedConnectionTypeError(
-        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+    return get_backend_adapter(connection_type).stage_keys_overlap_target(
+        connection,
+        stage_table,
+        target_table,
+        key_columns,
     )
 
 
@@ -160,10 +118,8 @@ def _null_safe_key_equality(
     right_alias: str,
     column_name: str,
 ) -> str:
-    quoted_column = quote_identifier(column_name, connection_type)
-    left_expr = f"{left_alias}.{quoted_column}"
-    right_expr = f"{right_alias}.{quoted_column}"
-    return (
-        f"({left_expr} = {right_expr} "
-        f"OR ({left_expr} IS NULL AND {right_expr} IS NULL))"
+    return get_backend_adapter(connection_type).null_safe_key_equality(
+        left_alias,
+        right_alias,
+        column_name,
     )

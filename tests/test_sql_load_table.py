@@ -89,6 +89,26 @@ def test_insert_table_batch_normalizes_decimal_for_clickhouse() -> None:
     assert inserted_df["count"].tolist() == [1, 2]
 
 
+def test_batch_insert_sql_builders_preserve_backend_shapes() -> None:
+    assert load_sql_table_module.build_gp_batch_insert_sql(
+        "schema.stage_table",
+        ["id", "value"],
+        query_label="load-stage",
+    ) == (
+        "/* analytics_toolkit query_label=load-stage */\n"
+        'INSERT INTO schema.stage_table ("id", "value") VALUES %s'
+    )
+
+    assert load_sql_table_module.build_trino_batch_insert_sql(
+        "schema.stage_table",
+        ["id", "value"],
+        row_count=2,
+    ) == (
+        'INSERT INTO schema.stage_table ("id", "value") '
+        "VALUES (?, ?), (?, ?)"
+    )
+
+
 def test_build_create_table_sql_uses_float64_for_decimal_clickhouse_columns() -> None:
     batch = pd.DataFrame(
         {

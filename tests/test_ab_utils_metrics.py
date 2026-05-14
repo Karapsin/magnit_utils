@@ -8,12 +8,16 @@ import pytest
 
 from analytics_toolkit.ab_utils import compute_test_metrics
 from analytics_toolkit.ab_utils.metrics import (
+    _apply_outliers_to_agg_ratio_components,
+    _apply_outliers_to_values,
     _build_comparisons,
     _build_metric_definitions,
+    _build_outlier_contexts,
     _build_ratio_valid_mask,
     _compute_agg_ratio_diff_standard_error,
     _compute_agg_ratio_group_stats,
     _compute_agg_ratio_variance,
+    _compute_cuped_statistics_from_frame,
     _compute_studentized_statistic,
     _compute_ttest_stat_and_p_value,
     _get_numeric_metric_series,
@@ -53,9 +57,11 @@ def _legacy_metric_test_statistic(
     baseline_group: str,
     test_group: str,
     metric_definition: dict[str, object],
+    outlier_context: dict[str, object] | None = None,
 ) -> float:
     if metric_definition["kind"] == "mean":
         metric_values = _get_numeric_metric_series(df, str(metric_definition["column"]))
+        metric_values, _ = _apply_outliers_to_values(metric_values, outlier_context)
         baseline_values = metric_values[df[group_column] == baseline_group].dropna()
         test_values = metric_values[df[group_column] == test_group].dropna()
         statistic, _ = _compute_ttest_stat_and_p_value(baseline_values, test_values)
@@ -69,15 +75,28 @@ def _legacy_metric_test_statistic(
         denominator=denominator,
         level=ratio_spec["level"],
     )
-    baseline_mask = (df[group_column] == baseline_group) & valid_mask
-    test_mask = (df[group_column] == test_group) & valid_mask
 
     if ratio_spec["level"] == "user":
-        baseline_values = (numerator[baseline_mask] / denominator[baseline_mask]).dropna()
-        test_values = (numerator[test_mask] / denominator[test_mask]).dropna()
+        ratio_values = pd.Series(np.nan, index=df.index, dtype=float)
+        ratio_values.loc[valid_mask] = numerator.loc[valid_mask] / denominator.loc[valid_mask]
+        ratio_values, _ = _apply_outliers_to_values(ratio_values, outlier_context)
+        baseline_values = ratio_values[df[group_column] == baseline_group].dropna()
+        test_values = ratio_values[df[group_column] == test_group].dropna()
         statistic, _ = _compute_ttest_stat_and_p_value(baseline_values, test_values)
         return statistic
 
+    numerator, denominator, _ = _apply_outliers_to_agg_ratio_components(
+        numerator=numerator,
+        denominator=denominator,
+        outlier_context=outlier_context,
+    )
+    valid_mask = _build_ratio_valid_mask(
+        numerator=numerator,
+        denominator=denominator,
+        level=ratio_spec["level"],
+    )
+    baseline_mask = (df[group_column] == baseline_group) & valid_mask
+    test_mask = (df[group_column] == test_group) & valid_mask
     baseline_frame = pd.DataFrame(
         {"numerator": numerator[baseline_mask], "denominator": denominator[baseline_mask]}
     )
@@ -108,10 +127,18 @@ def _legacy_bootstrap_adjustment(
     ratio_metrics: list[dict[str, object]] | None,
     test_vs_test: bool,
     resamples: int,
+    outliers_quantile: float = 0.999,
+    outliers_policy: str = "truncate",
 ) -> pd.DataFrame:
     metric_columns = [column for column in df.columns if column not in {group, user_id}]
     ratio_specs = _normalize_ratio_metrics(df, ratio_metrics, reserved_columns={group, user_id})
     metric_definitions = _build_metric_definitions(metric_columns, ratio_specs)
+    outlier_contexts = _build_outlier_contexts(
+        df=df,
+        metric_definitions=metric_definitions,
+        outliers_quantile=outliers_quantile,
+        outliers_policy=outliers_policy,
+    )
     group_names = df[group].drop_duplicates().tolist()
     comparisons = _build_comparisons(group_names, control, test_vs_test=test_vs_test)
     include_groups = len(group_names) > 2
@@ -135,6 +162,7 @@ def _legacy_bootstrap_adjustment(
                     baseline_group=baseline_group,
                     test_group=test_group,
                     metric_definition=metric_definition,
+                    outlier_context=outlier_contexts[str(metric_definition["metric_key"])],
                 )
                 if not math.isnan(statistic):
                     comparison_statistics.append(abs(statistic))
@@ -152,6 +180,7 @@ def _legacy_bootstrap_adjustment(
                 baseline_group=baseline_group,
                 test_group=test_group,
                 metric_definition=metric_definition,
+                outlier_context=outlier_contexts[metric_key],
             )
             if math.isnan(observed_stat):
                 adjusted_p = math.nan
@@ -213,13 +242,16 @@ def test_compute_test_metrics_adds_metric_control_and_metric_test_columns() -> N
 
     result = compute_test_metrics(df, test_vs_test=False)
 
-    assert result.columns.tolist()[:11] == [
+    assert result.columns.tolist()[:14] == [
         "metric_type",
         "group_1",
         "group_2",
         "metric_name",
         "n0",
         "n1",
+        "outliers_cutoff",
+        "outliers_n_control",
+        "outliers_n_test",
         "metric_control",
         "metric_test",
         "variance_control",
@@ -234,11 +266,15 @@ def test_compute_test_metrics_adds_metric_control_and_metric_test_columns() -> N
         & (result["group_2"] == "control")
         & (result["metric_name"] == "orders")
     ].iloc[0]
+    orders_cutoff = float(df["orders"].quantile(0.999))
     assert orders_row["metric_type"] == "mean"
     assert orders_row["metric_control"] == pytest.approx((10 + 12 + 9) / 3)
-    assert orders_row["metric_test"] == pytest.approx((13 + 15 + 11 + 14) / 4)
+    assert orders_row["metric_test"] == pytest.approx((13 + orders_cutoff + 11 + 14) / 4)
+    assert orders_row["outliers_cutoff"] == pytest.approx(orders_cutoff)
+    assert orders_row["outliers_n_control"] == 0
+    assert orders_row["outliers_n_test"] == 1
     control_values = pd.Series([10, 12, 9], dtype=float)
-    test_values = pd.Series([13, 15, 11, 14], dtype=float)
+    test_values = pd.Series([13, orders_cutoff, 11, 14], dtype=float)
     expected_control_variance = control_values.var(ddof=1)
     expected_test_variance = test_values.var(ddof=1)
     assert orders_row["variance_control"] == pytest.approx(expected_control_variance)
@@ -263,8 +299,9 @@ def test_compute_test_metrics_uses_raw_relative_fields() -> None:
         & (result["group_2"] == "control")
         & (result["metric_name"] == "orders")
     ].iloc[0]
+    orders_cutoff = float(df["orders"].quantile(0.999))
     expected_control = (10 + 12 + 9) / 3
-    expected_test = (13 + 15 + 11 + 14) / 4
+    expected_test = (13 + orders_cutoff + 11 + 14) / 4
     expected_delta_abs = expected_test - expected_control
     assert orders_row["delta_relative"] == pytest.approx(expected_delta_abs / expected_control)
 
@@ -319,6 +356,140 @@ def test_ratio_metrics_default_to_agg_level() -> None:
             test_ratio=test_stats["ratio"],
         )
     )
+
+
+def test_compute_test_metrics_drop_outliers_updates_counts() -> None:
+    df = pd.DataFrame(
+        {
+            "user_id": list(range(1, 7)),
+            "group_name": ["control", "control", "control", "test", "test", "test"],
+            "orders": [1, 2, 100, 3, 4, 200],
+        }
+    )
+
+    result = compute_test_metrics(
+        df,
+        control="control",
+        test_vs_test=False,
+        outliers_quantile=0.8,
+        outliers_policy="drop",
+    )
+
+    orders_row = result[result["metric_name"] == "orders"].iloc[0]
+    assert orders_row["outliers_cutoff"] == pytest.approx(float(df["orders"].quantile(0.8)))
+    assert orders_row["outliers_n_control"] == 0
+    assert orders_row["outliers_n_test"] == 1
+    assert orders_row["n0"] == 3
+    assert orders_row["n1"] == 2
+    assert orders_row["metric_test"] == pytest.approx((3 + 4) / 2)
+
+
+def test_compute_test_metrics_uses_global_outlier_cutoff_across_groups() -> None:
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4],
+            "group_name": ["control", "control", "test", "test"],
+            "orders": [1, 2, 100, 200],
+        }
+    )
+
+    result = compute_test_metrics(
+        df,
+        control="control",
+        test_vs_test=False,
+        outliers_quantile=0.75,
+    )
+
+    orders_row = result[result["metric_name"] == "orders"].iloc[0]
+    cutoff = float(df["orders"].quantile(0.75))
+    assert cutoff == pytest.approx(125.0)
+    assert orders_row["outliers_cutoff"] == pytest.approx(cutoff)
+    assert orders_row["metric_test"] == pytest.approx((100 + cutoff) / 2)
+
+
+def test_compute_test_metrics_user_ratio_outliers_truncate_and_drop() -> None:
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4],
+            "group_name": ["control", "control", "test", "test"],
+            "clicks": [1, 2, 3, 100],
+            "impressions": [10, 10, 10, 10],
+        }
+    )
+    ratio_metrics = [
+        {
+            "name": "ctr_user",
+            "numerator": "clicks",
+            "denominator": "impressions",
+            "level": "user",
+        }
+    ]
+
+    truncate_result = compute_test_metrics(
+        df,
+        control="control",
+        ratio_metrics=ratio_metrics,
+        test_vs_test=False,
+        outliers_quantile=0.75,
+        outliers_policy="truncate",
+    )
+    drop_result = compute_test_metrics(
+        df,
+        control="control",
+        ratio_metrics=ratio_metrics,
+        test_vs_test=False,
+        outliers_quantile=0.75,
+        outliers_policy="drop",
+    )
+
+    cutoff = float(pd.Series([0.1, 0.2, 0.3, 10.0]).quantile(0.75))
+    truncate_row = truncate_result[truncate_result["metric_name"] == "ctr_user"].iloc[0]
+    drop_row = drop_result[drop_result["metric_name"] == "ctr_user"].iloc[0]
+    assert truncate_row["outliers_cutoff"] == pytest.approx(cutoff)
+    assert truncate_row["outliers_n_test"] == 1
+    assert truncate_row["metric_test"] == pytest.approx((0.3 + cutoff) / 2)
+    assert truncate_row["n1"] == 2
+    assert drop_row["metric_test"] == pytest.approx(0.3)
+    assert drop_row["n1"] == 1
+
+
+def test_compute_test_metrics_agg_ratio_outliers_drop_and_truncate() -> None:
+    df = pd.DataFrame(
+        {
+            "user_id": [1, 2, 3, 4],
+            "group_name": ["control", "control", "test", "test"],
+            "clicks": [1, 2, 3, 100],
+            "impressions": [10, 10, 10, 10],
+        }
+    )
+    ratio_metrics = [{"name": "ctr", "numerator": "clicks", "denominator": "impressions"}]
+
+    truncate_result = compute_test_metrics(
+        df,
+        control="control",
+        ratio_metrics=ratio_metrics,
+        test_vs_test=False,
+        outliers_quantile=0.75,
+        outliers_policy="truncate",
+    )
+    drop_result = compute_test_metrics(
+        df,
+        control="control",
+        ratio_metrics=ratio_metrics,
+        test_vs_test=False,
+        outliers_quantile=0.75,
+        outliers_policy="drop",
+    )
+
+    cutoff = float(pd.Series([0.1, 0.2, 0.3, 10.0]).quantile(0.75))
+    truncate_row = truncate_result[truncate_result["metric_name"] == "ctr"].iloc[0]
+    drop_row = drop_result[drop_result["metric_name"] == "ctr"].iloc[0]
+    assert truncate_row["outliers_cutoff"] == pytest.approx(cutoff)
+    assert truncate_row["outliers_n_test"] == 1
+    assert truncate_row["metric_test"] == pytest.approx((3 + cutoff * 10) / 20)
+    assert truncate_row["n1"] == 2
+    assert drop_row["metric_test"] == pytest.approx(3 / 10)
+    assert drop_row["n1"] == 1
 
 
 def test_compute_test_metrics_parallel_bootstrap_is_reproducible() -> None:
@@ -385,6 +556,28 @@ def test_compute_test_metrics_validates_bootstrap_parameters(
         compute_test_metrics(df, **kwargs)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "error_type", "message"),
+    [
+        ({"outliers_quantile": 0}, ValueError, "outliers_quantile must be strictly between 0 and 1"),
+        ({"outliers_quantile": 1}, ValueError, "outliers_quantile must be strictly between 0 and 1"),
+        ({"outliers_quantile": True}, TypeError, "outliers_quantile must be numeric"),
+        ({"outliers_quantile": "0.9"}, TypeError, "outliers_quantile must be numeric"),
+        ({"outliers_policy": "winsorize"}, ValueError, "outliers_policy must be 'truncate' or 'drop'"),
+        ({"outliers_policy": None}, TypeError, "outliers_policy must be a string"),
+    ],
+)
+def test_compute_test_metrics_validates_outlier_parameters(
+    kwargs: dict[str, object],
+    error_type: type[Exception],
+    message: str,
+) -> None:
+    df = _build_sample_metrics_df()
+
+    with pytest.raises(error_type, match=message):
+        compute_test_metrics(df, **kwargs)
+
+
 def test_compute_test_metrics_adds_cuped_p_value_for_mean_metrics() -> None:
     df = pd.DataFrame(
         {
@@ -413,6 +606,53 @@ def test_compute_test_metrics_adds_cuped_p_value_for_mean_metrics() -> None:
     orders_row = result[result["metric_name"] == "orders"].iloc[0]
     assert not math.isnan(float(orders_row["s.e. CUPED"]))
     assert not math.isnan(float(orders_row["p-value CUPED"]))
+
+
+def test_compute_test_metrics_cuped_uses_transformed_values() -> None:
+    df = pd.DataFrame(
+        {
+            "user_id": list(range(1, 7)),
+            "group_name": ["control", "control", "control", "test", "test", "test"],
+            "orders": [1, 2, 3, 4, 5, 100],
+        }
+    )
+    pre_df = pd.DataFrame(
+        {
+            "user_id": list(range(1, 7)),
+            "group_name": ["control", "control", "control", "test", "test", "test"],
+            "orders": [10, 1, 8, 3, 6, 200],
+        }
+    )
+
+    result = compute_test_metrics(
+        df,
+        control="control",
+        test_vs_test=False,
+        pre_exp_metrics_df=pre_df,
+        outliers_quantile=0.8,
+        outliers_policy="truncate",
+    )
+
+    cuped_frame = pd.DataFrame(
+        {
+            "group_name": df["group_name"],
+            "metric_exp": [1.0, 2.0, 3.0, 4.0, 5.0, 5.0],
+            "metric_pre": [10.0, 1.0, 8.0, 3.0, 6.0, 10.0],
+        }
+    )
+    expected_p_value, expected_standard_error, reason = _compute_cuped_statistics_from_frame(
+        cuped_frame=cuped_frame,
+        group_column="group_name",
+        baseline_group="control",
+        test_group="test",
+    )
+    assert reason is None
+
+    orders_row = result[result["metric_name"] == "orders"].iloc[0]
+    assert orders_row["outliers_cutoff"] == pytest.approx(5.0)
+    assert orders_row["outliers_n_test"] == 1
+    assert orders_row["s.e. CUPED"] == pytest.approx(expected_standard_error)
+    assert orders_row["p-value CUPED"] == pytest.approx(expected_p_value)
 
 
 def test_compute_test_metrics_adds_cuped_p_value_for_ratio_metrics() -> None:

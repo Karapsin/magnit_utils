@@ -3,25 +3,33 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ....capabilities import validate_write_mode
+from ....ch_options import (
+    normalize_ch_columns_or_expression,
+    normalize_ch_string,
+    validate_ch_options_not_used,
+)
 from ....connection.config import TrinoConfig, get_connection_config
 from ....connection.errors import (
     SqlOperationContext,
-    annotate_sql_exception,
     sql_preview,
 )
 from ....connection.get_sql_connection import get_sql_connection
+from ....operation_runner import run_annotated_once, run_retrying_operation
+from ....plan_steps import (
+    add_analyze_step,
+    add_clear_target_steps,
+    add_cleanup_stage_step,
+    add_count_step,
+    add_create_table_placeholder_step,
+    add_drop_target_steps,
+    add_insert_from_stage_step,
+    add_load_stage_step,
+)
 from ....plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from analytics_toolkit.general import time_print
 from ...load.load_sql_table import AmbiguousTableLoadError
 from ...load.stage import build_stage_table_name
-from ...table.table_ops import (
-    build_analyze_table_sql,
-    build_clear_table_sqls,
-    build_count_table_rows_sql,
-    build_drop_ch_distributed_table_pair_sqls,
-    build_insert_from_table_sql,
-    count_table_rows,
-)
+from ...table.table_ops import count_table_rows
 from ...table.table_validation import normalize_key_columns
 from .attempt import run_transfer_attempt
 from ..runtime.models import TransferOptions
@@ -85,55 +93,53 @@ def transfer_table(
     )
 
     def transfer_operation(attempt: int) -> int:
-        try:
-            if options.to_db_backend == "gp":
+        del attempt
+        if options.to_db_backend == "gp":
+            return run_transfer_attempt(
+                options=options,
+                read_retry_cnt=options.retry_cnt,
+                insert_retry_cnt=options.retry_cnt,
+            )
+
+        def stage_restart_operation(inner_attempt: int) -> int:
+            del inner_attempt
+            try:
                 return run_transfer_attempt(
                     options=options,
                     read_retry_cnt=options.retry_cnt,
-                    insert_retry_cnt=options.retry_cnt,
+                    insert_retry_cnt=1,
                 )
+            except AmbiguousTableLoadError as exc:
+                time_print(
+                    f"Discarding staged load for {options.to_db_key} "
+                    f"and restarting from scratch: {exc!r}"
+                )
+                raise
 
-            def stage_restart_operation(inner_attempt: int) -> int:
-                try:
-                    return run_transfer_attempt(
-                        options=options,
-                        read_retry_cnt=options.retry_cnt,
-                        insert_retry_cnt=1,
-                    )
-                except AmbiguousTableLoadError as exc:
-                    time_print(
-                        f"Discarding staged load for {options.to_db_key} "
-                        f"and restarting from scratch: {exc!r}"
-                    )
-                    raise
+        return run_with_retry(
+            operation_name=(
+                f"restarting staged transfer from {options.from_db_key} "
+                f"to {options.to_db_key}: {options.target_table}"
+            ),
+            retry_cnt=options.retry_cnt,
+            timeout_increment=options.timeout_increment,
+            operation=stage_restart_operation,
+            retryable_exceptions=(AmbiguousTableLoadError,),
+        )
 
-            return run_with_retry(
-                operation_name=(
-                    f"restarting staged transfer from {options.from_db_key} "
-                    f"to {options.to_db_key}: {options.target_table}"
-                ),
-                retry_cnt=options.retry_cnt,
-                timeout_increment=options.timeout_increment,
-                operation=stage_restart_operation,
-                retryable_exceptions=(AmbiguousTableLoadError,),
-            )
-        except Exception as exc:
-            annotate_sql_exception(
-                exc,
-                SqlOperationContext(
-                    operation="transfer_table",
-                    alias=options.to_db_key,
-                    backend=options.to_db_backend,
-                    phase="transfer",
-                    target_table=options.target_table,
-                    retry_attempt=attempt,
-                    sql_preview=sql_preview(options.source_sql),
-                ),
-            )
-            raise
+    def transfer_context(attempt: int) -> SqlOperationContext:
+        return SqlOperationContext(
+            operation="transfer_table",
+            alias=options.to_db_key,
+            backend=options.to_db_backend,
+            phase="transfer",
+            target_table=options.target_table,
+            retry_attempt=attempt,
+            sql_preview=sql_preview(options.source_sql),
+        )
 
     if options.replace_target_table:
-        total_rows = run_with_retry(
+        total_rows = run_retrying_operation(
             operation_name=(
                 f"restarting full transfer from {options.from_db_key} "
                 f"to {options.to_db_key}: {options.target_table}"
@@ -141,9 +147,13 @@ def transfer_table(
             retry_cnt=options.full_retry_cnt,
             timeout_increment=options.full_timeout_increment,
             operation=transfer_operation,
+            context_factory=transfer_context,
         )
     else:
-        total_rows = transfer_operation(1)
+        total_rows = run_annotated_once(
+            operation=lambda: transfer_operation(1),
+            context=transfer_context(1),
+        )
 
     time_print(
         f"Finished table transfer from {options.from_db_key} "
@@ -217,14 +227,14 @@ def build_transfer_options(
             if trino_insert_chunk_size is not None
             else configured_trino_insert_chunk_size
         ),
-        ch_partition_by=_normalize_ch_columns_or_expression(
+        ch_partition_by=normalize_ch_columns_or_expression(
             ch_partition_by,
             "ch_partition_by",
         ),
-        ch_order_by=_normalize_ch_columns_or_expression(ch_order_by, "ch_order_by"),
-        ch_engine=_normalize_ch_string(ch_engine, "ch_engine"),
-        ch_cluster=_normalize_ch_string(ch_cluster, "ch_cluster"),
-        ch_sharding_key=_normalize_ch_string(ch_sharding_key, "sharding_key"),
+        ch_order_by=normalize_ch_columns_or_expression(ch_order_by, "ch_order_by"),
+        ch_engine=normalize_ch_string(ch_engine, "ch_engine"),
+        ch_cluster=normalize_ch_string(ch_cluster, "ch_cluster"),
+        ch_sharding_key=normalize_ch_string(ch_sharding_key, "sharding_key"),
         query_label=query_label,
     )
 
@@ -250,8 +260,15 @@ def build_transfer_options(
         )
     if options.trino_insert_chunk_size is not None and options.trino_insert_chunk_size <= 0:
         raise ValueError("trino_insert_chunk_size must be a positive integer.")
-    if options.to_db_backend != "ch":
-        _validate_ch_options_not_used(options)
+    validate_ch_options_not_used(
+        target_backend=options.to_db_backend,
+        option_owner="to_db",
+        ch_partition_by=options.ch_partition_by,
+        ch_order_by=options.ch_order_by,
+        ch_engine=options.ch_engine,
+        ch_cluster=options.ch_cluster,
+        ch_sharding_key=options.ch_sharding_key,
+    )
     return options
 
 
@@ -303,111 +320,85 @@ def build_transfer_table_plan(options: TransferOptions) -> SqlPlan:
         phase="read_source",
         query_label=options.query_label,
     )
-    plan.add(
-        f"CREATE TABLE {stage_table} (<source query schema>)",
+    add_create_table_placeholder_step(
+        plan,
         alias=options.to_db_key,
         backend=options.to_db_backend,
         phase="create_stage",
-        target_table=stage_table,
+        table_name=stage_table,
         query_label=options.query_label,
     )
-    plan.add(
-        f"INSERT INTO {stage_table} SELECT * FROM (<source batches>)",
+    add_load_stage_step(
+        plan,
         alias=options.to_db_key,
         backend=options.to_db_backend,
-        phase="load_stage",
-        target_table=stage_table,
+        stage_table=stage_table,
+        sql=f"INSERT INTO {stage_table} SELECT * FROM (<source batches>)",
         query_label=options.query_label,
     )
     if options.write_mode == "replace":
         if options.to_db_backend == "ch":
-            plan.extend(
-                build_drop_ch_distributed_table_pair_sqls(
-                    options.target_table,
-                    ch_cluster=options.ch_cluster,
-                    query_label=options.query_label,
-                ),
+            add_drop_target_steps(
+                plan,
                 alias=options.to_db_key,
                 backend=options.to_db_backend,
-                phase="drop_target",
-                target_table=options.target_table,
+                table_name=options.target_table,
+                ch_cluster=options.ch_cluster,
+                query_label=options.query_label,
             )
         else:
-            for sql in build_clear_table_sqls(
-                options.to_db_backend,
-                options.target_table,
-                query_label=options.query_label,
-            ):
-                plan.add(
-                    sql,
-                    alias=options.to_db_key,
-                    backend=options.to_db_backend,
-                    phase="clear_target",
-                    target_table=options.target_table,
-                )
-    elif options.write_mode == "truncate_insert":
-        for sql in build_clear_table_sqls(
-            options.to_db_backend,
-            options.target_table,
-            query_label=options.query_label,
-        ):
-            plan.add(
-                sql,
+            add_clear_target_steps(
+                plan,
                 alias=options.to_db_key,
                 backend=options.to_db_backend,
-                phase="clear_target",
-                target_table=options.target_table,
-            )
-    plan.add(
-        f"CREATE TABLE {options.target_table} (<source query schema>)",
-        alias=options.to_db_key,
-        backend=options.to_db_backend,
-        phase="create_target",
-        target_table=options.target_table,
-        query_label=options.query_label,
-    )
-    plan.add(
-        build_insert_from_table_sql(
-            options.to_db_backend,
-            options.target_table,
-            stage_table,
-            query_label=options.query_label,
-        ),
-        alias=options.to_db_key,
-        backend=options.to_db_backend,
-        phase="insert_target",
-        target_table=options.target_table,
-        source_table=stage_table,
-    )
-    if options.to_db_backend != "ch":
-        plan.add(
-            build_analyze_table_sql(
-                options.to_db_backend,
-                options.target_table,
+                table_name=options.target_table,
                 query_label=options.query_label,
-            ),
+                ch_cluster=options.ch_cluster,
+            )
+    elif options.write_mode == "truncate_insert":
+        add_clear_target_steps(
+            plan,
             alias=options.to_db_key,
             backend=options.to_db_backend,
-            phase="analyze",
-            target_table=options.target_table,
-        )
-    plan.add(
-        build_count_table_rows_sql(
-            options.to_db_backend,
-            options.target_table,
+            table_name=options.target_table,
             query_label=options.query_label,
-        ),
+            ch_cluster=options.ch_cluster,
+        )
+    add_create_table_placeholder_step(
+        plan,
         alias=options.to_db_key,
         backend=options.to_db_backend,
-        phase="count_target",
-        target_table=options.target_table,
+        table_name=options.target_table,
+        query_label=options.query_label,
     )
-    plan.add(
-        f"DROP TABLE IF EXISTS {stage_table}",
+    add_insert_from_stage_step(
+        plan,
         alias=options.to_db_key,
         backend=options.to_db_backend,
-        phase="drop_stage",
-        target_table=stage_table,
+        target_table=options.target_table,
+        stage_table=stage_table,
+        phase="insert_target",
+        query_label=options.query_label,
+    )
+    add_analyze_step(
+        plan,
+        alias=options.to_db_key,
+        backend=options.to_db_backend,
+        table_name=options.target_table,
+        query_label=options.query_label,
+    )
+    add_count_step(
+        plan,
+        alias=options.to_db_key,
+        backend=options.to_db_backend,
+        table_name=options.target_table,
+        query_label=options.query_label,
+    )
+    add_cleanup_stage_step(
+        plan,
+        alias=options.to_db_key,
+        backend=options.to_db_backend,
+        stage_table=stage_table,
         query_label=options.query_label,
     )
     return plan
@@ -441,40 +432,3 @@ def _best_effort_transfer_target_count(options: TransferOptions) -> int | None:
                 connection.close()
             except Exception:
                 pass
-
-
-def _normalize_ch_columns_or_expression(
-    value: Sequence[str] | str | None,
-    option_name: str,
-) -> list[str] | str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return _normalize_ch_string(value, option_name)
-
-    normalized = [_normalize_ch_string(column, option_name) for column in value]
-    if not normalized:
-        raise ValueError(f"{option_name} must not be empty when provided.")
-    if len(set(normalized)) != len(normalized):
-        raise ValueError(f"{option_name} must not contain duplicate column names.")
-    return normalized
-
-
-def _normalize_ch_string(value: str, option_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{option_name} must not be empty.")
-    return normalized
-
-
-def _validate_ch_options_not_used(options: TransferOptions) -> None:
-    if options.ch_partition_by is not None:
-        raise ValueError("ch_partition_by can only be used when to_db has type 'ch'.")
-    if options.ch_order_by is not None:
-        raise ValueError("ch_order_by can only be used when to_db has type 'ch'.")
-    if options.ch_engine != "ReplicatedMergeTree":
-        raise ValueError("ch_engine can only be used when to_db has type 'ch'.")
-    if options.ch_cluster != "{cluster}":
-        raise ValueError("ch_cluster can only be used when to_db has type 'ch'.")
-    if options.ch_sharding_key != "rand()":
-        raise ValueError("sharding_key can only be used when to_db has type 'ch'.")

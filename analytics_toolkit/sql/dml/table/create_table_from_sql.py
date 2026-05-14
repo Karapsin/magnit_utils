@@ -6,6 +6,12 @@ from typing import Any
 import pandas as pd
 import sqlparse
 
+from ...ch_options import (
+    normalize_ch_columns_or_expression,
+    normalize_ch_string,
+    validate_ch_columns_in_columns,
+    validate_ch_options_not_used,
+)
 from ...connection.config import get_connection_config
 from ...connection.errors import (
     InvalidSqlInputError,
@@ -16,12 +22,15 @@ from ...connection.errors import (
 from ...connection.get_sql_connection import get_sql_connection
 from ...ddl.create_sql_table import create_sql_table
 from ...labels import apply_query_label
+from ...plan_steps import (
+    add_create_table_placeholder_step,
+    add_drop_target_steps,
+    add_inspect_schema_step,
+    add_insert_query_step,
+)
 from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from ..transfer.schema import inspect_source_query_schema, map_source_schema_to_target
 from .table_ops import (
-    build_drop_ch_distributed_table_pair_sqls,
-    build_drop_table_sql,
-    build_insert_from_query_sql,
     drop_ch_distributed_table_pair,
     drop_table,
     insert_from_query,
@@ -65,14 +74,14 @@ def create_table_from_sql(
         else get_connection_config(table_db)
     )
     gp_distribution = normalize_key_columns(gp_distributed_by_key)
-    ch_partition = _normalize_ch_columns_or_expression(
+    ch_partition = normalize_ch_columns_or_expression(
         ch_partition_by,
         "ch_partition_by",
     )
-    ch_order = _normalize_ch_columns_or_expression(ch_order_by, "ch_order_by")
-    ch_engine_name = _normalize_ch_string(ch_engine, "ch_engine")
-    ch_cluster_name = _normalize_ch_string(ch_cluster, "ch_cluster")
-    ch_sharding_key = _normalize_ch_string(sharding_key, "sharding_key")
+    ch_order = normalize_ch_columns_or_expression(ch_order_by, "ch_order_by")
+    ch_engine_name = normalize_ch_string(ch_engine, "ch_engine")
+    ch_cluster_name = normalize_ch_string(ch_cluster, "ch_cluster")
+    ch_sharding_key = normalize_ch_string(sharding_key, "sharding_key")
 
     _validate_backend_options(
         target_backend=target_config.backend,
@@ -96,6 +105,7 @@ def create_table_from_sql(
             source_sql=source_sql,
             insert_data=insert_data,
             drop_target_if_exists=drop_target_if_exists,
+            ch_cluster=ch_cluster_name,
             query_label=query_label,
         )
 
@@ -123,8 +133,18 @@ def create_table_from_sql(
         source_columns = [column.name for column in source_schema]
         _validate_source_columns(source_columns)
         validate_key_columns_in_columns(gp_distribution, source_columns)
-        _validate_ch_columns_in_columns(ch_partition, source_columns, "ch_partition_by")
-        _validate_ch_columns_in_columns(ch_order, source_columns, "ch_order_by")
+        validate_ch_columns_in_columns(
+            ch_partition,
+            source_columns,
+            "ch_partition_by",
+            data_name="source query",
+        )
+        validate_ch_columns_in_columns(
+            ch_order,
+            source_columns,
+            "ch_order_by",
+            data_name="source query",
+        )
 
         target_column_types = map_source_schema_to_target(
             source_schema,
@@ -261,6 +281,7 @@ def _build_create_table_from_sql_plan(
     source_sql: str,
     insert_data: bool,
     drop_target_if_exists: bool,
+    ch_cluster: str,
     query_label: str | None,
 ) -> SqlPlan:
     plan = SqlPlan(
@@ -275,58 +296,38 @@ def _build_create_table_from_sql_plan(
             "drop_target_if_exists": drop_target_if_exists,
         },
     )
-    plan.add(
-        f"SELECT * FROM ({source_sql}) AS source_schema_probe WHERE 1 = 0",
+    add_inspect_schema_step(
+        plan,
         alias=source_key,
         backend=source_backend,
-        phase="inspect_source_schema",
+        source_sql=source_sql,
         query_label=query_label,
     )
     if drop_target_if_exists:
-        if target_backend == "ch":
-            plan.extend(
-                build_drop_ch_distributed_table_pair_sqls(
-                    target_table,
-                    query_label=query_label,
-                ),
-                alias=target_key,
-                backend=target_backend,
-                phase="drop_target",
-                target_table=target_table,
-            )
-        else:
-            plan.add(
-                build_drop_table_sql(
-                    target_backend,
-                    target_table,
-                    query_label=query_label,
-                ),
-                alias=target_key,
-                backend=target_backend,
-                phase="drop_target",
-                target_table=target_table,
-            )
-    plan.add(
-        f"CREATE TABLE {target_table} (<source query schema>)",
+        add_drop_target_steps(
+            plan,
+            alias=target_key,
+            backend=target_backend,
+            table_name=target_table,
+            ch_cluster=ch_cluster,
+            query_label=query_label,
+        )
+    add_create_table_placeholder_step(
+        plan,
         alias=target_key,
         backend=target_backend,
-        phase="create_target",
-        target_table=target_table,
+        table_name=target_table,
         query_label=query_label,
     )
     if insert_data:
-        plan.add(
-            build_insert_from_query_sql(
-                target_backend,
-                target_table,
-                source_sql,
-                {},
-                query_label=query_label,
-            ).replace(" ()", "").replace("SELECT  FROM", "SELECT * FROM"),
+        add_insert_query_step(
+            plan,
             alias=target_key,
             backend=target_backend,
-            phase="insert_data",
             target_table=target_table,
+            source_sql=source_sql,
+            phase="insert_data",
+            query_label=query_label,
         )
     return plan
 
@@ -371,64 +372,15 @@ def _validate_backend_options(
         raise ValueError(
             "gp_distributed_by_key can only be used when table_db has type 'gp'."
         )
-    if target_backend != "ch":
-        if ch_partition_by is not None:
-            raise ValueError(
-                "ch_partition_by can only be used when table_db has type 'ch'."
-            )
-        if ch_order_by is not None:
-            raise ValueError(
-                "ch_order_by can only be used when table_db has type 'ch'."
-            )
-        if ch_engine != "ReplicatedMergeTree":
-            raise ValueError("ch_engine can only be used when table_db has type 'ch'.")
-        if ch_cluster != "{cluster}":
-            raise ValueError("ch_cluster can only be used when table_db has type 'ch'.")
-        if ch_sharding_key != "rand()":
-            raise ValueError(
-                "sharding_key can only be used when table_db has type 'ch'."
-            )
-
-
-def _normalize_ch_columns_or_expression(
-    value: Sequence[str] | str | None,
-    option_name: str,
-) -> list[str] | str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return _normalize_ch_string(value, option_name)
-
-    normalized = [_normalize_ch_string(column, option_name) for column in value]
-    if not normalized:
-        raise ValueError(f"{option_name} must not be empty when provided.")
-    if len(set(normalized)) != len(normalized):
-        raise ValueError(f"{option_name} must not contain duplicate column names.")
-    return normalized
-
-
-def _normalize_ch_string(value: str, option_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{option_name} must not be empty.")
-    return normalized
-
-
-def _validate_ch_columns_in_columns(
-    value: list[str] | str | None,
-    columns: Sequence[str],
-    option_name: str,
-) -> None:
-    if value is None or isinstance(value, str):
-        return
-
-    available_columns = {str(column) for column in columns}
-    missing_columns = [column for column in value if column not in available_columns]
-    if missing_columns:
-        raise ValueError(
-            f"{option_name} columns were not found in the source query: "
-            + ", ".join(missing_columns)
-        )
+    validate_ch_options_not_used(
+        target_backend=target_backend,
+        option_owner="table_db",
+        ch_partition_by=ch_partition_by,
+        ch_order_by=ch_order_by,
+        ch_engine=ch_engine,
+        ch_cluster=ch_cluster,
+        ch_sharding_key=ch_sharding_key,
+    )
 
 
 def _close_connections(

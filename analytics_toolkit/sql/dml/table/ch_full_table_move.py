@@ -6,6 +6,7 @@ from typing import Any
 from ...connection.config import get_connection_config
 from ...connection.errors import UnsupportedConnectionTypeError
 from ...connection.get_sql_connection import get_sql_connection
+from ...ch_lifecycle import drop_ch_distributed_table_pair
 from ...ddl.create_sql_table import (
     build_ch_shard_table_name,
     quote_identifier,
@@ -13,7 +14,7 @@ from ...ddl.create_sql_table import (
 )
 from ...ddl.create_sql_table import _wait_for_ch_table
 from analytics_toolkit.general import time_print
-from .table_ops import _execute_ch_command, drop_table, insert_from_table
+from .table_ops import _execute_ch_command, insert_from_table
 
 
 _SHARD_ENGINE_FOLLOWING_CLAUSES = (
@@ -250,12 +251,12 @@ def _drop_ch_distributed_table_pair(
     *,
     shard_table: str | None = None,
 ) -> None:
-    shard_table = shard_table or build_ch_shard_table_name(table_name)
-    drop_table("ch", connection, table_name)
-    drop_table("ch", connection, shard_table)
-    if ch_cluster is not None:
-        drop_table("ch", connection, table_name, ch_cluster=ch_cluster)
-        drop_table("ch", connection, shard_table, ch_cluster=ch_cluster)
+    drop_ch_distributed_table_pair(
+        connection,
+        table_name,
+        ch_cluster=ch_cluster,
+        shard_table=shard_table,
+    )
 
 
 def _replace_create_table_identifier(ddl: str, target_table: str) -> str:

@@ -17,6 +17,21 @@ Helpers for AB-test related workflows.
 
 Missing metric values are ignored on a per-metric basis.
 
+Outlier handling is enabled by default. For each metric, an upper-tail cutoff is
+computed once across all experiment groups from `outliers_quantile=0.999`.
+Values above the cutoff are handled according to `outliers_policy`:
+
+- `"truncate"` (default): cap values at the cutoff
+- `"drop"`: treat values above the cutoff as missing
+
+Mean metrics use their non-missing metric values for the cutoff. `level="user"`
+ratio metrics use valid per-user ratios after denominator filtering. `level="agg"`
+ratio metrics identify outlier rows from `numerator / denominator` only when the
+row denominator is positive; denominator values `<= 0` keep the existing aggregate
+ratio behavior and are not classified as row-ratio outliers. For aggregate ratios,
+`"drop"` excludes outlier rows from numerator/denominator sums and variance, while
+`"truncate"` replaces an outlier row numerator with `cutoff * denominator`.
+
 The reported `mde_abs` and `mde_relative` use a normal approximation based on the
 observed group variances and sample sizes.
 
@@ -47,6 +62,8 @@ Other function options:
 
 - `mde_alpha=0.05`
 - `mde_power=0.80`
+- `outliers_quantile=0.999`: upper-tail quantile used for the per-metric outlier cutoff
+- `outliers_policy="truncate"`: either `"truncate"` or `"drop"`
 - `pre_exp_metrics_df=None`: optional pre-experiment dataframe used to compute CUPED-adjusted standard errors and p-values
 - `test_vs_test=True`: when `False`, only compare each test group against control
 - `multiple_comparisons_adjustment=False`: when `True`, add `s.e. bootstrap` and `bootstrap_adj_p`
@@ -61,6 +78,8 @@ Output notes:
 - `metric_type` is `"mean"` for regular metrics and `"ratio"` for ratio metrics
 - `group_1` and `group_2` are included when there are more than two experiment groups
 - `metric_control` and `metric_test` contain the metric value in the baseline and test groups
+- `outliers_cutoff` contains the global metric cutoff used for the comparison
+- `outliers_n_control` and `outliers_n_test` count values or rows above the cutoff in the baseline and test groups
 - `variance_control` and `variance_test` contain the uncertainty variance inputs for each group
 - `s.e.` is the standard error of `delta_abs`
 - `delta_relative` and `mde_relative` are raw relative changes, e.g. `0.05` for 5%

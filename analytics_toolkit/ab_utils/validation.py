@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+from numbers import Real
+
 import pandas as pd
 
 
@@ -15,6 +18,19 @@ def _validate_mde_parameters(mde_alpha: float, mde_power: float) -> None:
         raise ValueError("mde_alpha must be between 0 and 1.")
     if not 0 < mde_power < 1:
         raise ValueError("mde_power must be between 0 and 1.")
+
+
+def _validate_outlier_parameters(outliers_quantile: float, outliers_policy: str) -> None:
+    if isinstance(outliers_quantile, bool) or not isinstance(outliers_quantile, Real):
+        raise TypeError("outliers_quantile must be numeric.")
+    outliers_quantile_float = float(outliers_quantile)
+    if not math.isfinite(outliers_quantile_float) or not 0 < outliers_quantile_float < 1:
+        raise ValueError("outliers_quantile must be strictly between 0 and 1.")
+    if not isinstance(outliers_policy, str):
+        raise TypeError("outliers_policy must be a string.")
+    normalized_policy = outliers_policy.strip().lower()
+    if normalized_policy not in {"truncate", "drop"}:
+        raise ValueError("outliers_policy must be 'truncate' or 'drop'.")
 
 
 def _validate_pre_experiment_dataframe(

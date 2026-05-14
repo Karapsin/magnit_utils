@@ -5,12 +5,14 @@ import pandas as pd
 from .bootstrap import _apply_multiple_comparisons_adjustment
 from .constants import DEFAULT_ALPHA, DEFAULT_POWER
 from .cuped import _compute_cuped_statistics
+from .outliers import _build_outlier_context
 from .ratio import _normalize_ratio_metrics
 from .rows import _build_comparisons, _build_metric_definitions, _build_metric_row
 from .validation import (
     _validate_input_columns,
     _validate_mde_parameters,
     _validate_multiple_comparisons_parameters,
+    _validate_outlier_parameters,
     _validate_pre_experiment_dataframe,
 )
 
@@ -30,6 +32,8 @@ def compute_test_metrics(
     bootstrap_n_jobs: int = 1,
     bootstrap_progress: bool = True,
     pre_exp_metrics_df: pd.DataFrame | None = None,
+    outliers_quantile: float = 0.999,
+    outliers_policy: str = "truncate",
 ) -> pd.DataFrame:
     """Compute per-metric experiment comparison statistics.
 
@@ -51,6 +55,12 @@ def compute_test_metrics(
         bootstrap_n_jobs=bootstrap_n_jobs,
         bootstrap_progress=bootstrap_progress,
     )
+    _validate_outlier_parameters(
+        outliers_quantile=outliers_quantile,
+        outliers_policy=outliers_policy,
+    )
+    normalized_outliers_quantile = float(outliers_quantile)
+    normalized_outliers_policy = outliers_policy.strip().lower()
 
     if df[user_id].isna().any():
         raise ValueError(f"Column '{user_id}' must not contain missing values.")
@@ -81,10 +91,26 @@ def compute_test_metrics(
     ratio_specs = _normalize_ratio_metrics(df, ratio_metrics, reserved_columns={group, user_id})
     comparisons = _build_comparisons(group_names, control, test_vs_test=test_vs_test)
     metric_definitions = _build_metric_definitions(metric_columns, ratio_specs)
+    for metric_definition in metric_definitions:
+        metric_definition["_outlier_context"] = _build_outlier_context(
+            df=df,
+            metric_definition=metric_definition,
+            outliers_quantile=normalized_outliers_quantile,
+            outliers_policy=normalized_outliers_policy,
+        )
+        if pre_exp_metrics_df is not None:
+            metric_definition["_pre_outlier_context"] = _build_outlier_context(
+                df=pre_exp_metrics_df,
+                metric_definition=metric_definition,
+                outliers_quantile=normalized_outliers_quantile,
+                outliers_policy=normalized_outliers_policy,
+                allow_missing=True,
+            )
 
     rows: list[dict[str, object]] = []
     for test_group, baseline_group in comparisons:
         for metric_definition in metric_definitions:
+            outlier_context = metric_definition.get("_outlier_context")
             row = _build_metric_row(
                 df=df,
                 group_column=group,
@@ -93,6 +119,7 @@ def compute_test_metrics(
                 metric_definition=metric_definition,
                 mde_alpha=mde_alpha,
                 mde_power=mde_power,
+                outlier_context=outlier_context,
             )
             row["_comparison_key"] = (test_group, baseline_group)
             if pre_exp_metrics_df is not None:
@@ -104,6 +131,8 @@ def compute_test_metrics(
                     baseline_group=baseline_group,
                     test_group=test_group,
                     metric_definition=metric_definition,
+                    outlier_context=outlier_context,
+                    pre_outlier_context=metric_definition.get("_pre_outlier_context"),
                 )
             if include_groups:
                 row = {
@@ -133,6 +162,9 @@ def compute_test_metrics(
         "metric_name",
         "n0",
         "n1",
+        "outliers_cutoff",
+        "outliers_n_control",
+        "outliers_n_test",
         "metric_control",
         "metric_test",
         "variance_control",

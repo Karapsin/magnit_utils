@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 from sqlglot import exp, parse_one
 
+from ..backend_adapters import get_backend_adapter
 from ..capabilities import get_backend_capability
 from ..connection.config import resolve_connection_backend
 from ..connection.errors import UnsupportedConnectionTypeError
@@ -66,38 +67,11 @@ def create_sql_table(
     if dry_run or return_sql:
         return plan
 
-    if backend == "gp":
-        cursor = connection.cursor()
-        try:
-            for create_sql in create_sqls:
-                cursor.execute(create_sql)
-            connection.commit()
-            return
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            cursor.close()
-
-    if backend == "trino":
-        cursor = connection.cursor()
-        try:
-            for create_sql in create_sqls:
-                cursor.execute(create_sql)
-            return
-        finally:
-            cursor.close()
-
+    get_backend_adapter(backend).execute_commands(connection, create_sqls)
     if backend == "ch":
-        for create_sql in create_sqls:
-            _execute_ch_command(connection, create_sql)
         if ch_distributed_table:
             _wait_for_ch_table(connection, table_name)
-        return
-
-    raise UnsupportedConnectionTypeError(
-        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
-    )
+    return
 
 
 def build_create_table_sql(
@@ -147,85 +121,140 @@ def build_create_table_sqls(
     query_label: str | None = None,
 ) -> list[str]:
     backend = resolve_connection_backend(connection_type)
-    column_defs = []
-    for column_name in batch.columns:
-        series = batch[column_name]
-        if column_types is not None:
-            db_type = _explicit_column_type(column_types, column_name)
-            column_defs.append(
-                f"{quote_identifier(column_name, backend)} {db_type}"
-            )
-        elif backend == "gp":
-            db_type = _infer_gp_type(series)
-            column_defs.append(
-                f'{quote_identifier(column_name, backend)} {db_type}'
-            )
-        elif backend == "trino":
-            db_type = _infer_trino_type(series)
-            column_defs.append(
-                f'{quote_identifier(column_name, backend)} {db_type}'
-            )
-        elif backend == "ch":
-            db_type = _infer_ch_type(series)
-            column_defs.append(
-                f"{quote_identifier(column_name, backend)} {db_type}"
-            )
-        else:
-            raise UnsupportedConnectionTypeError(
-                "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
-            )
-
-    joined_columns = ", ".join(column_defs)
-    if backend == "ch":
-        if ch_distributed_table:
-            return _apply_query_label_to_sqls(
-                build_ch_distributed_create_table_sqls(
-                    table_name=table_name,
-                    joined_columns=joined_columns,
-                    ch_partition_by=ch_partition_by,
-                    ch_order_by=ch_order_by,
-                    ch_engine=ch_engine,
-                    ch_cluster=ch_cluster,
-                    ch_sharding_key=ch_sharding_key,
-                ),
-                query_label,
-            )
-        return _apply_query_label_to_sqls(
-            [
-                f"CREATE TABLE {table_name} ({joined_columns}) "
-                "ENGINE = MergeTree ORDER BY tuple()"
-            ],
-            query_label,
-        )
-    if backend == "trino":
-        return _apply_query_label_to_sqls(
-            [
-                f"CREATE TABLE {table_name} ({joined_columns}) "
-                "WITH (format = 'PARQUET', object_store_layout_enabled = true)"
-            ],
-            query_label,
-        )
-    if backend == "gp":
-        storage_sql = (
-            "WITH (appendoptimized = TRUE, compresstype = zstd, compresslevel = 2)"
-        )
-        if gp_distributed_by_key:
-            distribution_sql = (
-                f"DISTRIBUTED BY ({column_list_sql(gp_distributed_by_key, backend)})"
-            )
-        else:
-            distribution_sql = "DISTRIBUTED RANDOMLY"
-        return _apply_query_label_to_sqls(
-            [
-                f"CREATE TABLE {table_name} ({joined_columns}) "
-                f"{storage_sql} {distribution_sql}"
-            ],
-            query_label,
-        )
+    joined_columns = _build_column_definitions(backend, batch, column_types)
     return _apply_query_label_to_sqls(
-        [f"CREATE TABLE {table_name} ({joined_columns})"],
+        _build_backend_create_table_sqls(
+            backend=backend,
+            table_name=table_name,
+            joined_columns=joined_columns,
+            gp_distributed_by_key=gp_distributed_by_key,
+            ch_partition_by=ch_partition_by,
+            ch_order_by=ch_order_by,
+            ch_engine=ch_engine,
+            ch_cluster=ch_cluster,
+            ch_sharding_key=ch_sharding_key,
+            ch_distributed_table=ch_distributed_table,
+        ),
         query_label,
     )
+
+
+def _build_column_definitions(
+    backend: str,
+    batch: pd.DataFrame,
+    column_types: Mapping[str, str] | None,
+) -> str:
+    column_defs = []
+    for column_name in batch.columns:
+        db_type = (
+            _explicit_column_type(column_types, column_name)
+            if column_types is not None
+            else _infer_backend_type(backend, batch[column_name])
+        )
+        column_defs.append(f"{quote_identifier(column_name, backend)} {db_type}")
+    return ", ".join(column_defs)
+
+
+def _infer_backend_type(backend: str, series: pd.Series) -> str:
+    try:
+        infer_type = _COLUMN_TYPE_INFERERS[backend]
+    except KeyError as exc:
+        raise UnsupportedConnectionTypeError(
+            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+        ) from exc
+    return infer_type(series)
+
+
+def _build_backend_create_table_sqls(
+    *,
+    backend: str,
+    table_name: str,
+    joined_columns: str,
+    gp_distributed_by_key: list[str] | None,
+    ch_partition_by: Sequence[str] | str | None,
+    ch_order_by: Sequence[str] | str | None,
+    ch_engine: str,
+    ch_cluster: str,
+    ch_sharding_key: str,
+    ch_distributed_table: bool,
+) -> list[str]:
+    try:
+        build_sqls = _CREATE_TABLE_SQL_BUILDERS[backend]
+    except KeyError as exc:
+        raise UnsupportedConnectionTypeError(
+            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+        ) from exc
+    return build_sqls(
+        table_name=table_name,
+        joined_columns=joined_columns,
+        gp_distributed_by_key=gp_distributed_by_key,
+        ch_partition_by=ch_partition_by,
+        ch_order_by=ch_order_by,
+        ch_engine=ch_engine,
+        ch_cluster=ch_cluster,
+        ch_sharding_key=ch_sharding_key,
+        ch_distributed_table=ch_distributed_table,
+    )
+
+
+def _build_gp_create_table_sqls(
+    *,
+    table_name: str,
+    joined_columns: str,
+    gp_distributed_by_key: list[str] | None,
+    **_: object,
+) -> list[str]:
+    storage_sql = "WITH (appendoptimized = TRUE, compresstype = zstd, compresslevel = 2)"
+    if gp_distributed_by_key:
+        distribution_sql = (
+            f"DISTRIBUTED BY ({column_list_sql(gp_distributed_by_key, 'gp')})"
+        )
+    else:
+        distribution_sql = "DISTRIBUTED RANDOMLY"
+    return [
+        f"CREATE TABLE {table_name} ({joined_columns}) "
+        f"{storage_sql} {distribution_sql}"
+    ]
+
+
+def _build_trino_create_table_sqls(
+    *,
+    table_name: str,
+    joined_columns: str,
+    **_: object,
+) -> list[str]:
+    return [
+        f"CREATE TABLE {table_name} ({joined_columns}) "
+        "WITH (format = 'PARQUET', object_store_layout_enabled = true)"
+    ]
+
+
+def _build_ch_create_table_sqls(
+    *,
+    table_name: str,
+    joined_columns: str,
+    ch_partition_by: Sequence[str] | str | None,
+    ch_order_by: Sequence[str] | str | None,
+    ch_engine: str,
+    ch_cluster: str,
+    ch_sharding_key: str,
+    ch_distributed_table: bool,
+    **_: object,
+) -> list[str]:
+    if ch_distributed_table:
+        return build_ch_distributed_create_table_sqls(
+            table_name=table_name,
+            joined_columns=joined_columns,
+            ch_partition_by=ch_partition_by,
+            ch_order_by=ch_order_by,
+            ch_engine=ch_engine,
+            ch_cluster=ch_cluster,
+            ch_sharding_key=ch_sharding_key,
+        )
+    return [
+        f"CREATE TABLE {table_name} ({joined_columns}) "
+        "ENGINE = MergeTree ORDER BY tuple()"
+    ]
 
 
 def _apply_query_label_to_sqls(sqls: list[str], query_label: str | None) -> list[str]:
@@ -413,20 +442,7 @@ def _is_simple_identifier(identifier: str) -> bool:
 
 
 def _execute_ch_command(connection: Any, sql: str) -> None:
-    if "ON CLUSTER" not in sql:
-        connection.command(sql)
-        return
-
-    try:
-        connection.command(
-            sql,
-            settings={
-                "distributed_ddl_task_timeout": 300,
-                "distributed_ddl_output_mode": "none",
-            },
-        )
-    except TypeError:
-        connection.command(sql)
+    get_backend_adapter("ch").execute_command(connection, sql)
 
 
 def _wait_for_ch_table(
@@ -506,3 +522,17 @@ def _infer_common_sql_type(series: pd.Series) -> str:
     ):
         return "DATE"
     return "TEXT"
+
+
+_COLUMN_TYPE_INFERERS = {
+    "gp": _infer_gp_type,
+    "trino": _infer_trino_type,
+    "ch": _infer_ch_type,
+}
+
+
+_CREATE_TABLE_SQL_BUILDERS = {
+    "gp": _build_gp_create_table_sqls,
+    "trino": _build_trino_create_table_sqls,
+    "ch": _build_ch_create_table_sqls,
+}

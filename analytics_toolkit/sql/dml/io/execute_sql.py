@@ -11,13 +11,12 @@ from ...connection.errors import (
     InvalidSqlInputError,
     SqlOperationContext,
     UnsupportedConnectionTypeError,
-    annotate_sql_exception,
     sql_preview,
 )
 from ...connection.config import get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ..transfer.runtime.retry import rollback_quietly, run_with_retry
+from ...operation_runner import run_connection_operation
 from analytics_toolkit.general import time_print
 
 
@@ -137,59 +136,37 @@ def execute_sql(
         raise ValueError("timeout_increment must be non-negative.")
     sql = apply_query_label(sql, query_label)
 
-    def operation(attempt: int) -> Any:
-        connection = get_sql_connection(connection_key)
-        try:
-            if backend == "trino":
-                return _execute_trino(
-                    connection,
-                    sql,
-                    random_sleep_seconds=random_sleep_seconds,
-                    print_queries=print_queries,
-                )
-            if backend == "gp":
-                return _execute_gp(
-                    connection,
-                    sql,
-                    random_sleep_seconds=random_sleep_seconds,
-                    print_queries=print_queries,
-                    gp_break_query=gp_break_query,
-                    gp_commit_each_statement=gp_commit_each_statement,
-                )
-            if backend == "ch":
-                return _execute_ch(
-                    connection,
-                    sql,
-                    random_sleep_seconds=random_sleep_seconds,
-                    print_queries=print_queries,
-                )
-            raise UnsupportedConnectionTypeError(
-                "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
-            )
-        except Exception as exc:
-            annotate_sql_exception(
-                exc,
-                SqlOperationContext(
-                    operation="execute_sql",
-                    alias=connection_key,
-                    backend=backend,
-                    phase="execute",
-                    retry_attempt=attempt,
-                    sql_preview=sql_preview(sql),
-                ),
-            )
-            if backend == "gp":
-                rollback_quietly(connection)
-            raise
-        finally:
-            time_print(f"Closing {connection_key} connection")
-            connection.close()
+    def operation(connection_ref: dict[str, Any], attempt: int) -> Any:
+        del attempt
+        return _execute_backend(
+            backend,
+            connection_ref["connection"],
+            sql,
+            random_sleep_seconds=random_sleep_seconds,
+            print_queries=print_queries,
+            gp_break_query=gp_break_query,
+            gp_commit_each_statement=gp_commit_each_statement,
+        )
 
-    return run_with_retry(
+    def context(attempt: int) -> SqlOperationContext:
+        return SqlOperationContext(
+            operation="execute_sql",
+            alias=connection_key,
+            backend=backend,
+            phase="execute",
+            retry_attempt=attempt,
+            sql_preview=sql_preview(sql),
+        )
+
+    return run_connection_operation(
         operation_name=f"executing SQL on {connection_key} ({backend})",
+        connection_key=connection_key,
+        backend=backend,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
+        open_connection=get_sql_connection,
         operation=operation,
+        context_factory=context,
     )
 
 
@@ -245,3 +222,42 @@ def _maybe_sleep_between_queries(
     sleep_seconds = random.expovariate(1 / random_sleep_seconds)
     time_print(f"Sleeping for {sleep_seconds:.2f}s before next query")
     time.sleep(sleep_seconds)
+
+
+_EXECUTE_FUNCTION_NAMES = {
+    "trino": "_execute_trino",
+    "gp": "_execute_gp",
+    "ch": "_execute_ch",
+}
+
+
+def _execute_backend(
+    backend: str,
+    connection: Any,
+    sql: str,
+    *,
+    random_sleep_seconds: float | None,
+    print_queries: bool,
+    gp_break_query: bool,
+    gp_commit_each_statement: bool,
+) -> Any:
+    function_name = _EXECUTE_FUNCTION_NAMES.get(backend)
+    if function_name is None:
+        raise UnsupportedConnectionTypeError(
+            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+        )
+    if backend == "gp":
+        return globals()[function_name](
+            connection,
+            sql,
+            random_sleep_seconds=random_sleep_seconds,
+            print_queries=print_queries,
+            gp_break_query=gp_break_query,
+            gp_commit_each_statement=gp_commit_each_statement,
+        )
+    return globals()[function_name](
+        connection,
+        sql,
+        random_sleep_seconds=random_sleep_seconds,
+        print_queries=print_queries,
+    )

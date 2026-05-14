@@ -6,6 +6,12 @@ import math
 import pandas as pd
 
 from .constants import DEFAULT_ALPHA, DEFAULT_POWER
+from .outliers import (
+    _apply_outliers_to_agg_ratio_components,
+    _apply_outliers_to_values,
+    _count_outliers_by_group,
+    _get_outlier_cutoff,
+)
 from .ratio import (
     _build_ratio_valid_mask,
     _compute_agg_ratio_group_stats,
@@ -73,10 +79,23 @@ def _build_metric_row(
     metric_definition: dict[str, object],
     mde_alpha: float,
     mde_power: float,
+    outlier_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    if outlier_context is None:
+        outlier_context = metric_definition.get("_outlier_context")
     if metric_definition["kind"] == "mean":
         metric_name = str(metric_definition["metric_key"])
         metric_values = _get_numeric_metric_series(df, str(metric_definition["column"]))
+        metric_values, outlier_mask = _apply_outliers_to_values(
+            metric_values,
+            outlier_context,
+        )
+        outliers_n_control, outliers_n_test = _count_outliers_by_group(
+            outlier_mask=outlier_mask,
+            group_values=df[group_column],
+            baseline_group=baseline_group,
+            test_group=test_group,
+        )
         baseline_values = metric_values[df[group_column] == baseline_group].dropna()
         test_values = metric_values[df[group_column] == test_group].dropna()
         return _build_mean_metric_row(
@@ -86,6 +105,9 @@ def _build_metric_row(
             test_values=test_values,
             mde_alpha=mde_alpha,
             mde_power=mde_power,
+            outliers_cutoff=_get_outlier_cutoff(outlier_context),
+            outliers_n_control=outliers_n_control,
+            outliers_n_test=outliers_n_test,
         )
 
     return _build_ratio_metric_row(
@@ -97,6 +119,7 @@ def _build_metric_row(
         ratio_spec=dict(metric_definition["ratio_spec"]),
         mde_alpha=mde_alpha,
         mde_power=mde_power,
+        outlier_context=outlier_context,
     )
 
 
@@ -107,6 +130,9 @@ def _build_mean_metric_row(
     test_values: pd.Series,
     mde_alpha: float,
     mde_power: float,
+    outliers_cutoff: float = math.nan,
+    outliers_n_control: int = 0,
+    outliers_n_test: int = 0,
 ) -> dict[str, object]:
     baseline_mean = _safe_mean(baseline_values)
     test_mean = _safe_mean(test_values)
@@ -127,6 +153,9 @@ def _build_mean_metric_row(
         "metric_name": metric_name,
         "n0": baseline_n,
         "n1": test_n,
+        "outliers_cutoff": outliers_cutoff,
+        "outliers_n_control": outliers_n_control,
+        "outliers_n_test": outliers_n_test,
         "metric_control": baseline_mean,
         "metric_test": test_mean,
         "variance_control": baseline_variance,
@@ -160,6 +189,7 @@ def _build_ratio_metric_row(
     ratio_spec: dict[str, str],
     mde_alpha: float,
     mde_power: float,
+    outlier_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     metric_name = metric_key
     numerator = _get_numeric_metric_series(df, ratio_spec["numerator"])
@@ -170,12 +200,22 @@ def _build_ratio_metric_row(
         denominator=denominator,
         level=ratio_spec["level"],
     )
-    baseline_mask = (df[group_column] == baseline_group) & valid_mask
-    test_mask = (df[group_column] == test_group) & valid_mask
 
     if ratio_spec["level"] == "user":
-        baseline_values = (numerator[baseline_mask] / denominator[baseline_mask]).dropna()
-        test_values = (numerator[test_mask] / denominator[test_mask]).dropna()
+        ratio_values = pd.Series(math.nan, index=df.index, dtype=float)
+        ratio_values.loc[valid_mask] = numerator.loc[valid_mask] / denominator.loc[valid_mask]
+        ratio_values, outlier_mask = _apply_outliers_to_values(
+            ratio_values,
+            outlier_context,
+        )
+        outliers_n_control, outliers_n_test = _count_outliers_by_group(
+            outlier_mask=outlier_mask,
+            group_values=df[group_column],
+            baseline_group=baseline_group,
+            test_group=test_group,
+        )
+        baseline_values = ratio_values[df[group_column] == baseline_group].dropna()
+        test_values = ratio_values[df[group_column] == test_group].dropna()
         return _build_mean_metric_row(
             metric_name=metric_name,
             metric_key=metric_key,
@@ -183,13 +223,34 @@ def _build_ratio_metric_row(
             test_values=test_values,
             mde_alpha=mde_alpha,
             mde_power=mde_power,
+            outliers_cutoff=_get_outlier_cutoff(outlier_context),
+            outliers_n_control=outliers_n_control,
+            outliers_n_test=outliers_n_test,
         )
 
+    numerator, denominator, outlier_mask = _apply_outliers_to_agg_ratio_components(
+        numerator=numerator,
+        denominator=denominator,
+        outlier_context=outlier_context,
+    )
+    valid_mask = _build_ratio_valid_mask(
+        numerator=numerator,
+        denominator=denominator,
+        level=ratio_spec["level"],
+    )
+    baseline_mask = (df[group_column] == baseline_group) & valid_mask
+    test_mask = (df[group_column] == test_group) & valid_mask
     baseline_frame = pd.DataFrame(
         {"numerator": numerator[baseline_mask], "denominator": denominator[baseline_mask]}
     )
     test_frame = pd.DataFrame(
         {"numerator": numerator[test_mask], "denominator": denominator[test_mask]}
+    )
+    outliers_n_control, outliers_n_test = _count_outliers_by_group(
+        outlier_mask=outlier_mask,
+        group_values=df[group_column],
+        baseline_group=baseline_group,
+        test_group=test_group,
     )
     baseline_stats = _compute_agg_ratio_group_stats(baseline_frame)
     test_stats = _compute_agg_ratio_group_stats(test_frame)
@@ -214,6 +275,9 @@ def _build_ratio_metric_row(
         "metric_name": metric_name,
         "n0": int(baseline_stats["n"]),
         "n1": int(test_stats["n"]),
+        "outliers_cutoff": _get_outlier_cutoff(outlier_context),
+        "outliers_n_control": outliers_n_control,
+        "outliers_n_test": outliers_n_test,
         "metric_control": baseline_stats["ratio"],
         "metric_test": test_stats["ratio"],
         "variance_control": baseline_variance,

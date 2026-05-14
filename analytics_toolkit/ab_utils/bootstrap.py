@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from .outliers import _apply_outliers_to_agg_ratio_components, _apply_outliers_to_values
 from .ratio import (
     _build_ratio_frame_from_arrays,
     _build_ratio_valid_mask_from_arrays,
@@ -31,6 +32,7 @@ def _apply_multiple_comparisons_adjustment(
     random_state: int | None,
     n_jobs: int,
     show_progress: bool,
+    outlier_contexts: dict[str, dict[str, object]] | None = None,
 ) -> None:
     if not rows:
         return
@@ -40,6 +42,7 @@ def _apply_multiple_comparisons_adjustment(
         group_column=group_column,
         metric_definitions=metric_definitions,
         comparisons=comparisons,
+        outlier_contexts=outlier_contexts,
     )
     family_max_statistics, delta_abs_by_comparison = _compute_bootstrap_statistics(
         bootstrap_context=bootstrap_context,
@@ -94,6 +97,7 @@ def _prepare_bootstrap_context(
     group_column: str,
     metric_definitions: list[dict[str, object]],
     comparisons: list[tuple[str, str]],
+    outlier_contexts: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     group_values = df[group_column].to_numpy()
     group_names = list(dict.fromkeys(group_values.tolist()))
@@ -103,26 +107,35 @@ def _prepare_bootstrap_context(
     metric_contexts: list[dict[str, object]] = []
     for metric_definition in metric_definitions:
         metric_key = str(metric_definition["metric_key"])
+        outlier_context = metric_definition.get("_outlier_context")
+        if outlier_context is None:
+            outlier_context = (outlier_contexts or {}).get(metric_key)
         if metric_definition["kind"] == "mean":
+            values = _get_numeric_metric_series(df, str(metric_definition["column"]))
+            values, _ = _apply_outliers_to_values(values, outlier_context)
             metric_contexts.append(
                 {
                     "kind": "mean",
                     "metric_key": metric_key,
-                    "values": _get_numeric_metric_series(
-                        df, str(metric_definition["column"])
-                    ).to_numpy(dtype=float),
+                    "values": values.to_numpy(dtype=float),
                 }
             )
             continue
 
         ratio_spec = dict(metric_definition["ratio_spec"])
-        numerator = _get_numeric_metric_series(df, ratio_spec["numerator"]).to_numpy(dtype=float)
-        denominator = _get_numeric_metric_series(df, ratio_spec["denominator"]).to_numpy(
-            dtype=float
-        )
+        numerator = _get_numeric_metric_series(df, ratio_spec["numerator"])
+        denominator = _get_numeric_metric_series(df, ratio_spec["denominator"])
+        if ratio_spec["level"] == "agg":
+            numerator, denominator, _ = _apply_outliers_to_agg_ratio_components(
+                numerator=numerator,
+                denominator=denominator,
+                outlier_context=outlier_context,
+            )
+        numerator_array = numerator.to_numpy(dtype=float)
+        denominator_array = denominator.to_numpy(dtype=float)
         valid_mask = _build_ratio_valid_mask_from_arrays(
-            numerator=numerator,
-            denominator=denominator,
+            numerator=numerator_array,
+            denominator=denominator_array,
             level=ratio_spec["level"],
         )
 
@@ -130,14 +143,17 @@ def _prepare_bootstrap_context(
             "kind": "ratio",
             "metric_key": metric_key,
             "level": ratio_spec["level"],
-            "numerator": numerator,
-            "denominator": denominator,
+            "numerator": numerator_array,
+            "denominator": denominator_array,
             "valid_mask": valid_mask,
         }
         if ratio_spec["level"] == "user":
-            ratio_values = np.full(numerator.shape[0], np.nan, dtype=float)
-            ratio_values[valid_mask] = numerator[valid_mask] / denominator[valid_mask]
-            ratio_context["values"] = ratio_values
+            ratio_values = pd.Series(np.nan, index=df.index, dtype=float)
+            ratio_values.loc[valid_mask] = (
+                numerator.loc[valid_mask] / denominator.loc[valid_mask]
+            )
+            ratio_values, _ = _apply_outliers_to_values(ratio_values, outlier_context)
+            ratio_context["values"] = ratio_values.to_numpy(dtype=float)
         metric_contexts.append(ratio_context)
 
     return {

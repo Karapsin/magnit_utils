@@ -5,48 +5,48 @@ from typing import Any
 import pandas as pd
 import sqlparse
 
+from ...backend_adapters import get_backend_adapter
 from ...connection.errors import (
     InvalidSqlInputError,
     SqlOperationContext,
     UnsupportedConnectionTypeError,
-    annotate_sql_exception,
     sql_preview,
 )
 from ...connection.config import get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ..transfer.runtime.retry import rollback_quietly, run_with_retry
+from ...operation_runner import run_connection_operation
 from analytics_toolkit.general import time_print
 
 
 def _read_trino(conn: Any, query: str, print_queries: bool = True) -> pd.DataFrame:
-    time_print("Reading DataFrame from trino")
-    try:
-        _maybe_print_query(query, print_queries)
-        return _read_dbapi_query(conn, query)
-    except Exception:
-        time_print(f"SQL failed on trino:\n{query}")
-        raise
+    return get_backend_adapter("trino").read_dataframe(
+        conn,
+        query,
+        print_queries=print_queries,
+        print_query=_maybe_print_query,
+        read_dbapi_query=_read_dbapi_query,
+    )
 
 
 def _read_gp(conn: Any, query: str, print_queries: bool = True) -> pd.DataFrame:
-    time_print("Reading DataFrame from gp")
-    try:
-        _maybe_print_query(query, print_queries)
-        return _read_dbapi_query(conn, query)
-    except Exception:
-        time_print(f"SQL failed on gp:\n{query}")
-        raise
+    return get_backend_adapter("gp").read_dataframe(
+        conn,
+        query,
+        print_queries=print_queries,
+        print_query=_maybe_print_query,
+        read_dbapi_query=_read_dbapi_query,
+    )
 
 
 def _read_ch(client: Any, query: str, print_queries: bool = True) -> pd.DataFrame:
-    time_print("Reading DataFrame from ch")
-    try:
-        _maybe_print_query(query, print_queries)
-        return client.query_df(query)
-    except Exception:
-        time_print(f"SQL failed on ch:\n{query}")
-        raise
+    return get_backend_adapter("ch").read_dataframe(
+        client,
+        query,
+        print_queries=print_queries,
+        print_query=_maybe_print_query,
+        read_dbapi_query=_read_dbapi_query,
+    )
 
 
 def _read_dbapi_query(conn: Any, query: str) -> pd.DataFrame:
@@ -80,52 +80,78 @@ def read_sql(
     if timeout_increment < 0:
         raise ValueError("timeout_increment must be non-negative.")
 
-    statements = [statement.strip() for statement in sqlparse.split(sql) if statement.strip()]
+    statements = [
+        statement.strip()
+        for statement in sqlparse.split(sql)
+        if statement.strip()
+    ]
     if len(statements) != 1:
         raise InvalidSqlInputError("read_sql expects exactly one SQL statement.")
     sql = apply_query_label(statements[0].rstrip(";").rstrip(), query_label)
 
-    def operation(attempt: int) -> pd.DataFrame:
-        connection = get_sql_connection(connection_key)
-        try:
-            if backend == "trino":
-                return _read_trino(connection, sql, print_queries=print_queries)
-            if backend == "gp":
-                return _read_gp(connection, sql, print_queries=print_queries)
-            if backend == "ch":
-                return _read_ch(connection, sql, print_queries=print_queries)
-            raise UnsupportedConnectionTypeError(
-                "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
-            )
-        except Exception as exc:
-            annotate_sql_exception(
-                exc,
-                SqlOperationContext(
-                    operation="read_sql",
-                    alias=connection_key,
-                    backend=backend,
-                    phase="read",
-                    retry_attempt=attempt,
-                    sql_preview=sql_preview(sql),
-                ),
-            )
-            if backend == "gp":
-                rollback_quietly(connection)
-            raise
-        finally:
-            time_print(f"Closing {connection_key} connection")
-            connection.close()
+    def operation(connection_ref: dict[str, Any], attempt: int) -> pd.DataFrame:
+        del attempt
+        return _read_backend(
+            backend,
+            connection_ref["connection"],
+            sql,
+            print_queries=print_queries,
+        )
 
-    return run_with_retry(
+    def context(attempt: int) -> SqlOperationContext:
+        return SqlOperationContext(
+            operation="read_sql",
+            alias=connection_key,
+            backend=backend,
+            phase="read",
+            retry_attempt=attempt,
+            sql_preview=sql_preview(sql),
+        )
+
+    return run_connection_operation(
         operation_name=f"reading query on {connection_key} ({backend})",
+        connection_key=connection_key,
+        backend=backend,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
+        open_connection=get_sql_connection,
         operation=operation,
+        context_factory=context,
     )
 
 
 def _maybe_print_query(query: str, print_queries: bool) -> None:
     if print_queries:
-        statements = [statement.strip() for statement in sqlparse.split(query) if statement.strip()]
+        statements = [
+            statement.strip()
+            for statement in sqlparse.split(query)
+            if statement.strip()
+        ]
         statement_to_print = statements[0] if statements else query.strip()
         time_print(f"Executing query:\n{statement_to_print}")
+
+
+_READ_FUNCTION_NAMES = {
+    "trino": "_read_trino",
+    "gp": "_read_gp",
+    "ch": "_read_ch",
+}
+
+
+def _read_backend(
+    backend: str,
+    connection: Any,
+    sql: str,
+    *,
+    print_queries: bool,
+) -> pd.DataFrame:
+    function_name = _READ_FUNCTION_NAMES.get(backend)
+    if function_name is None:
+        raise UnsupportedConnectionTypeError(
+            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+        )
+    return globals()[function_name](
+        connection,
+        sql,
+        print_queries=print_queries,
+    )

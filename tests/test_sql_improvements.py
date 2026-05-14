@@ -17,6 +17,12 @@ read_sql_module = importlib.import_module("analytics_toolkit.sql.dml.io.read_sql
 transfer_api_module = importlib.import_module(
     "analytics_toolkit.sql.dml.transfer.flow.api"
 )
+create_table_module = importlib.import_module(
+    "analytics_toolkit.sql.dml.table.create_table_from_sql"
+)
+ch_ctas_module = importlib.import_module(
+    "analytics_toolkit.sql.dml.table.ch_create_table_as"
+)
 cli_module = importlib.import_module("analytics_toolkit.cli")
 
 
@@ -140,6 +146,94 @@ def test_transfer_dry_run_includes_source_stage_and_target_steps() -> None:
     assert plan.statements[0].phase == "read_source"
     assert "query_label=copy-target" in plan.statements[0].sql
     assert plan.statements[-1].phase == "drop_stage"
+
+
+def test_load_df_clickhouse_dry_run_preserves_lifecycle_order_and_cluster() -> None:
+    plan = load_df_module.load_df(
+        "ch",
+        "analytics.events",
+        pd.DataFrame({"dt": ["2024-01-01"], "id": [1]}),
+        write_mode="truncate_insert",
+        dry_run=True,
+        ch_partition_by=["dt"],
+        ch_order_by=["dt", "id"],
+        ch_cluster="analytics",
+    )
+
+    assert plan.statements[0].phase == "clear_target"
+    assert plan.sqls[0] == (
+        "TRUNCATE TABLE IF EXISTS analytics.events_shard ON CLUSTER analytics"
+    )
+    assert plan.sqls[1] == "TRUNCATE TABLE IF EXISTS analytics.events"
+    assert plan.statements[2].phase == "create_target"
+    assert plan.sqls[2].startswith(
+        "CREATE TABLE IF NOT EXISTS analytics.events_shard"
+    )
+    assert "ON CLUSTER analytics" in plan.sqls[2]
+
+
+def test_transfer_clickhouse_dry_run_preserves_drop_pair_cluster() -> None:
+    plan = transfer_api_module.transfer_table(
+        from_db="gp",
+        to_db="ch",
+        from_sql="select id from source_table",
+        to_table="analytics.events",
+        dry_run=True,
+        ch_cluster="analytics",
+    )
+
+    drop_sqls = [
+        statement.sql
+        for statement in plan.statements
+        if statement.phase == "drop_target"
+    ]
+    assert drop_sqls == [
+        "DROP TABLE IF EXISTS analytics.events",
+        "DROP TABLE IF EXISTS analytics.events_shard",
+        "DROP TABLE IF EXISTS analytics.events ON CLUSTER analytics",
+        "DROP TABLE IF EXISTS analytics.events_shard ON CLUSTER analytics",
+    ]
+
+
+def test_create_table_from_sql_clickhouse_dry_run_uses_shared_plan_steps() -> None:
+    plan = create_table_module.create_table_from_sql(
+        "gp",
+        "analytics.events",
+        "select id from source_table",
+        table_db="ch",
+        drop_target_if_exists=True,
+        insert_data=True,
+        dry_run=True,
+        ch_cluster="analytics",
+    )
+
+    assert [statement.phase for statement in plan.statements] == [
+        "inspect_source_schema",
+        "drop_target",
+        "drop_target",
+        "drop_target",
+        "drop_target",
+        "create_target",
+        "insert_data",
+    ]
+    assert plan.sqls[3] == "DROP TABLE IF EXISTS analytics.events ON CLUSTER analytics"
+
+
+def test_ch_create_table_as_dry_run_uses_lifecycle_drop_order() -> None:
+    plan = ch_ctas_module.ch_create_table_as(
+        "ch",
+        "analytics.events",
+        "select 1 as id",
+        dry_run=True,
+        ch_cluster="analytics",
+    )
+
+    assert plan.sqls[:4] == [
+        "DROP TABLE IF EXISTS analytics.events",
+        "DROP TABLE IF EXISTS analytics.events_shard",
+        "DROP TABLE IF EXISTS analytics.events ON CLUSTER analytics",
+        "DROP TABLE IF EXISTS analytics.events_shard ON CLUSTER analytics",
+    ]
 
 
 def test_validate_connections_and_cli_output(capsys) -> None:

@@ -12,6 +12,7 @@ execute_sql_module = importlib.import_module("analytics_toolkit.sql.dml.io.execu
 read_sql_module = importlib.import_module("analytics_toolkit.sql.dml.io.read_sql")
 load_df_module = importlib.import_module("analytics_toolkit.sql.dml.load.load_df")
 retry_module = importlib.import_module("analytics_toolkit.sql.dml.transfer.runtime.retry")
+operation_runner_module = importlib.import_module("analytics_toolkit.sql.operation_runner")
 
 
 class FakeConnection:
@@ -164,6 +165,75 @@ def test_run_with_retry_does_not_retry_trino_syntax_error() -> None:
         raise AssertionError("Expected syntax error to be raised.")
 
     assert attempts == [1]
+
+
+def test_operation_runner_retries_with_fresh_connections_and_gp_rollback() -> None:
+    first_connection = FakeConnection("first")
+    second_connection = FakeConnection("second")
+    connections = [first_connection, second_connection]
+    attempts: list[str] = []
+
+    def operation(connection_ref: dict[str, FakeConnection], attempt: int) -> str:
+        attempts.append(connection_ref["connection"].name)
+        if attempt == 1:
+            raise RuntimeError("temporary failure")
+        return "ok"
+
+    result = operation_runner_module.run_connection_operation(
+        operation_name="test gp operation",
+        connection_key="gp",
+        backend="gp",
+        retry_cnt=2,
+        timeout_increment=0,
+        open_connection=lambda connection_key: connections.pop(0),
+        operation=operation,
+        context_factory=lambda attempt: operation_runner_module.SqlOperationContext(
+            operation="test",
+            alias="gp",
+            backend="gp",
+            retry_attempt=attempt,
+        ),
+    )
+
+    assert result == "ok"
+    assert attempts == ["first", "second"]
+    assert first_connection.rollback_calls == 1
+    assert second_connection.rollback_calls == 0
+    assert first_connection.close_calls == 1
+    assert second_connection.close_calls == 1
+
+
+def test_operation_runner_does_not_rollback_non_gp_backends() -> None:
+    for backend in ("trino", "ch"):
+        connection = FakeConnection(backend)
+
+        try:
+            operation_runner_module.run_connection_operation(
+                operation_name=f"test {backend} operation",
+                connection_key=backend,
+                backend=backend,
+                retry_cnt=1,
+                timeout_increment=0,
+                open_connection=lambda connection_key, conn=connection: conn,
+                operation=lambda connection_ref, attempt: (_ for _ in ()).throw(
+                    RuntimeError("failure")
+                ),
+                context_factory=lambda attempt, name=backend: (
+                    operation_runner_module.SqlOperationContext(
+                        operation="test",
+                        alias=name,
+                        backend=name,
+                        retry_attempt=attempt,
+                    )
+                ),
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Expected operation failure.")
+
+        assert connection.rollback_calls == 0
+        assert connection.close_calls == 1
 
 
 def test_load_df_retries_whole_flow_from_start(monkeypatch) -> None:

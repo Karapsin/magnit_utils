@@ -9,12 +9,11 @@ from ...connection.errors import (
     InvalidSqlInputError,
     SqlOperationContext,
     UnsupportedConnectionTypeError,
-    annotate_sql_exception,
     sql_preview,
 )
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ..transfer.runtime.retry import rollback_quietly, run_with_retry
+from ...operation_runner import run_connection_operation
 from analytics_toolkit.general import time_print
 from .execute_sql import (
     _execute_ch_statement,
@@ -53,63 +52,44 @@ def execute_read(
     if not statements:
         raise InvalidSqlInputError("Query string must not be empty.")
     if query_label is not None:
-        statements = [apply_query_label(statement, query_label) for statement in statements]
+        statements = [
+            apply_query_label(statement, query_label)
+            for statement in statements
+        ]
 
-    def operation(attempt: int) -> pd.DataFrame:
-        connection = get_sql_connection(connection_key)
-        try:
-            if backend == "trino":
-                return _execute_read_trino(
-                    connection,
-                    statements,
-                    random_sleep_seconds=random_sleep_seconds,
-                    print_queries=print_queries,
-                )
-            if backend == "gp":
-                return _execute_read_gp(
-                    connection,
-                    statements,
-                    random_sleep_seconds=random_sleep_seconds,
-                    print_queries=print_queries,
-                    gp_break_query=gp_break_query,
-                    gp_commit_each_statement=gp_commit_each_statement,
-                )
-            if backend == "ch":
-                return _execute_read_ch(
-                    connection,
-                    statements,
-                    random_sleep_seconds=random_sleep_seconds,
-                    print_queries=print_queries,
-                )
-            raise UnsupportedConnectionTypeError(
-                "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
-            )
-        except Exception as exc:
-            annotate_sql_exception(
-                exc,
-                SqlOperationContext(
-                    operation="execute_read",
-                    alias=connection_key,
-                    backend=backend,
-                    phase="execute_read",
-                    retry_attempt=attempt,
-                    sql_preview=sql_preview(statements[-1] if statements else sql),
-                ),
-            )
-            if backend == "gp":
-                rollback_quietly(connection)
-            raise
-        finally:
-            time_print(f"Closing {connection_key} connection")
-            connection.close()
+    def operation(connection_ref: dict[str, Any], attempt: int) -> pd.DataFrame:
+        del attempt
+        return _execute_read_backend(
+            backend,
+            connection_ref["connection"],
+            statements,
+            random_sleep_seconds=random_sleep_seconds,
+            print_queries=print_queries,
+            gp_break_query=gp_break_query,
+            gp_commit_each_statement=gp_commit_each_statement,
+        )
 
-    return run_with_retry(
+    def context(attempt: int) -> SqlOperationContext:
+        return SqlOperationContext(
+            operation="execute_read",
+            alias=connection_key,
+            backend=backend,
+            phase="execute_read",
+            retry_attempt=attempt,
+            sql_preview=sql_preview(statements[-1] if statements else sql),
+        )
+
+    return run_connection_operation(
         operation_name=(
             f"executing SQL and reading final query on {connection_key} ({backend})"
         ),
+        connection_key=connection_key,
+        backend=backend,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
+        open_connection=get_sql_connection,
         operation=operation,
+        context_factory=context,
     )
 
 
@@ -242,3 +222,42 @@ def _read_dbapi_cursor(
     columns = [column[0] for column in cursor.description or []]
     rows = cursor.fetchall()
     return pd.DataFrame(rows, columns=columns)
+
+
+_EXECUTE_READ_FUNCTION_NAMES = {
+    "trino": "_execute_read_trino",
+    "gp": "_execute_read_gp",
+    "ch": "_execute_read_ch",
+}
+
+
+def _execute_read_backend(
+    backend: str,
+    connection: Any,
+    statements: list[str],
+    *,
+    random_sleep_seconds: float | None,
+    print_queries: bool,
+    gp_break_query: bool,
+    gp_commit_each_statement: bool,
+) -> pd.DataFrame:
+    function_name = _EXECUTE_READ_FUNCTION_NAMES.get(backend)
+    if function_name is None:
+        raise UnsupportedConnectionTypeError(
+            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+        )
+    if backend == "gp":
+        return globals()[function_name](
+            connection,
+            statements,
+            random_sleep_seconds=random_sleep_seconds,
+            print_queries=print_queries,
+            gp_break_query=gp_break_query,
+            gp_commit_each_statement=gp_commit_each_statement,
+        )
+    return globals()[function_name](
+        connection,
+        statements,
+        random_sleep_seconds=random_sleep_seconds,
+        print_queries=print_queries,
+    )

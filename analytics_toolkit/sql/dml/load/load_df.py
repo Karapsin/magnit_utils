@@ -6,37 +6,44 @@ from typing import Any
 import pandas as pd
 
 from ...capabilities import validate_write_mode
+from ...ch_options import (
+    normalize_ch_columns_or_expression,
+    normalize_ch_string,
+    validate_ch_columns_in_columns,
+    validate_ch_options_not_used,
+)
 from ...connection.errors import (
     SqlOperationContext,
-    annotate_sql_exception,
     sql_preview,
 )
 from ...ddl.create_sql_table import (
-    build_ch_shard_table_name,
     build_create_table_sqls,
     column_list_sql,
     create_sql_table,
 )
 from ...connection.config import TrinoConfig, get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
+from ...operation_runner import run_connection_operation
+from ...plan_steps import (
+    add_analyze_step,
+    add_clear_target_steps,
+    add_count_step,
+    add_cleanup_stage_step,
+    add_create_table_steps,
+    add_drop_target_steps,
+    add_insert_from_stage_step,
+    add_load_stage_step,
+)
 from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
-from ..transfer.runtime.retry import rollback_quietly, run_with_retry
+from ..transfer.runtime.retry import run_with_retry
 from analytics_toolkit.general import time_print
 from .load_sql_table import insert_table_batch
 from .models import LoadOptions, LoadState
 from .stage import create_stage_table
 from ..table.table_ops import (
     analyze_table,
-    build_analyze_table_sql,
-    build_clear_table_sqls,
-    build_count_table_rows_sql,
-    build_drop_ch_distributed_table_pair_sqls,
-    build_drop_table_sql,
-    build_insert_from_table_sql,
-    clear_ch_distributed_table_data,
-    clear_target_table,
+    apply_target_write_mode,
     count_table_rows,
-    drop_ch_distributed_table_pair,
     drop_table,
     insert_from_table,
     get_trino_table_column_types,
@@ -96,196 +103,79 @@ def load_df(
     if dry_run or return_sql:
         return build_load_df_plan(options, df)
 
-    def operation(attempt: int) -> int | SqlOperationResult:
-        connection_ref = {"connection": get_sql_connection(options.connection_key)}
-        state: LoadState | None = None
-        try:
-            state = LoadState(
-                target_exists=table_exists(
-                    options.connection_backend,
-                    connection_ref["connection"],
-                    options.destination_table,
-                    connection_key=options.connection_key,
-                )
+    state_holder: dict[str, LoadState | None] = {"state": None}
+
+    def operation(
+        connection_ref: dict[str, Any],
+        attempt: int,
+    ) -> int | SqlOperationResult:
+        del attempt
+        state_holder["state"] = None
+        state = _initialize_load_state(options, connection_ref["connection"])
+        state_holder["state"] = state
+        if df.empty:
+            return _handle_empty_dataframe_load(
+                options,
+                state,
+                return_metadata=return_metadata,
             )
 
-            if df.empty:
-                if options.append and state.target_exists:
-                    time_print(
-                        f"Skipping empty DataFrame append into "
-                        f"{options.connection_key}.{options.destination_table}"
-                    )
-                    if return_metadata:
-                        return SqlOperationResult(
-                            rows=0,
-                            metadata=SqlOperationMetadata(
-                                source_rows=0,
-                                inserted_rows=0,
-                                affected_rows=0,
-                            ),
-                        )
-                    return 0
-                raise ValueError("Cannot create or replace a table from an empty DataFrame.")
+        _validate_load_dataframe(options, df)
+        _prepare_load_target(
+            options=options,
+            state=state,
+            connection=connection_ref["connection"],
+            df=df,
+        )
 
-            if options.gp_distributed_by_key:
-                validate_key_columns_in_columns(options.gp_distributed_by_key, df.columns)
+        inserted_rows = _load_dataframe(
+            options=options,
+            state=state,
+            connection_ref=connection_ref,
+            df=df,
+        )
 
-            validate_key_columns_in_columns(options.key_columns, df.columns)
-            _validate_ch_columns_in_dataframe(
-                options.ch_partition_by,
-                df.columns,
-                "ch_partition_by",
-            )
-            _validate_ch_columns_in_dataframe(
-                options.ch_order_by,
-                df.columns,
-                "ch_order_by",
-            )
-            _validate_dataframe_key_uniqueness(df, options.key_columns)
+        _analyze_load_target(options, connection_ref["connection"])
+        time_print(
+            f"Finished loading DataFrame into "
+            f"{options.connection_key}.{options.destination_table}: "
+            f"{inserted_rows} row(s)"
+        )
+        return _build_load_result(
+            options=options,
+            state=state,
+            connection=connection_ref["connection"],
+            source_rows=len(df),
+            inserted_rows=inserted_rows,
+            return_metadata=return_metadata,
+        )
 
-            if options.write_mode == "replace":
-                if options.connection_backend == "ch":
-                    time_print(
-                        "Dropping existing ClickHouse distributed table pair "
-                        f"{options.destination_table}"
-                    )
-                    drop_ch_distributed_table_pair(
-                        connection_ref["connection"],
-                        options.destination_table,
-                        ch_cluster=options.ch_cluster,
-                        query_label=options.query_label,
-                    )
-                    state.target_exists = False
-                elif state.target_exists:
-                    time_print(
-                        f"Dropping existing table {options.destination_table} "
-                        f"on {options.connection_key}"
-                    )
-                    drop_table(
-                        options.connection_backend,
-                        connection_ref["connection"],
-                        options.destination_table,
-                        query_label=options.query_label,
-                    )
-                    state.target_exists = False
-            elif options.write_mode == "truncate_insert" and state.target_exists:
-                if options.connection_backend == "ch":
-                    clear_ch_distributed_table_data(
-                        connection_ref["connection"],
-                        options.destination_table,
-                        ch_cluster=options.ch_cluster,
-                        query_label=options.query_label,
-                    )
-                else:
-                    clear_target_table(
-                        options.connection_backend,
-                        connection_ref["connection"],
-                        options.destination_table,
-                        query_label=options.query_label,
-                    )
+    def context(attempt: int) -> SqlOperationContext:
+        return SqlOperationContext(
+            operation="load_df",
+            alias=options.connection_key,
+            backend=options.connection_backend,
+            phase="load",
+            target_table=options.destination_table,
+            retry_attempt=attempt,
+            sql_preview=sql_preview(options.destination_table),
+        )
 
-            if options.connection_backend == "ch":
-                create_kwargs: dict[str, Any] = {}
-                if options.query_label is not None:
-                    create_kwargs["query_label"] = options.query_label
-                create_sql_table(
-                    options.connection_backend,
-                    connection_ref["connection"],
-                    options.destination_table,
-                    df,
-                    gp_distributed_by_key=options.gp_distributed_by_key,
-                    ch_partition_by=options.ch_partition_by,
-                    ch_order_by=options.ch_order_by,
-                    ch_engine=options.ch_engine,
-                    ch_cluster=options.ch_cluster,
-                    ch_sharding_key=options.ch_sharding_key,
-                    ch_distributed_table=True,
-                    **create_kwargs,
-                )
-                state.target_exists = True
-            elif not state.target_exists:
-                create_kwargs = {}
-                if options.query_label is not None:
-                    create_kwargs["query_label"] = options.query_label
-                create_sql_table(
-                    options.connection_backend,
-                    connection_ref["connection"],
-                    options.destination_table,
-                    df,
-                    gp_distributed_by_key=options.gp_distributed_by_key,
-                    **create_kwargs,
-                )
+    def cleanup(connection_ref: dict[str, Any]) -> None:
+        _cleanup_load(connection_ref, options, state_holder["state"])
 
-            if options.connection_backend == "trino":
-                state.target_column_types = get_trino_table_column_types(
-                    connection_ref["connection"],
-                    options.destination_table,
-                    connection_key=options.connection_key,
-                )
-
-            inserted_rows = _load_dataframe(
-                options=options,
-                state=state,
-                connection_ref=connection_ref,
-                df=df,
-            )
-
-            if options.query_label is None:
-                analyze_table(
-                    connection_type=options.connection_backend,
-                    connection=connection_ref["connection"],
-                    table_name=options.destination_table,
-                )
-            else:
-                analyze_table(
-                    connection_type=options.connection_backend,
-                    connection=connection_ref["connection"],
-                    table_name=options.destination_table,
-                    query_label=options.query_label,
-                )
-            time_print(
-                f"Finished loading DataFrame into "
-                f"{options.connection_key}.{options.destination_table}: "
-                f"{inserted_rows} row(s)"
-            )
-            if return_metadata:
-                return SqlOperationResult(
-                    rows=inserted_rows,
-                    metadata=_build_load_metadata(
-                        options=options,
-                        state=state,
-                        connection=connection_ref["connection"],
-                        source_rows=len(df),
-                        inserted_rows=inserted_rows,
-                    ),
-                )
-            return inserted_rows
-        except Exception as exc:
-            annotate_sql_exception(
-                exc,
-                SqlOperationContext(
-                    operation="load_df",
-                    alias=options.connection_key,
-                    backend=options.connection_backend,
-                    phase="load",
-                    target_table=options.destination_table,
-                    retry_attempt=attempt,
-                    sql_preview=sql_preview(options.destination_table),
-                ),
-            )
-            if options.connection_backend == "gp":
-                rollback_quietly(connection_ref["connection"])
-            raise
-        finally:
-            _cleanup_load(connection_ref, options, state)
-
-    return run_with_retry(
+    return run_connection_operation(
         operation_name=(
             f"loading DataFrame into {options.connection_key}.{options.destination_table}"
         ),
+        connection_key=options.connection_key,
+        backend=options.connection_backend,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
+        open_connection=get_sql_connection,
         operation=operation,
+        context_factory=context,
+        cleanup=cleanup,
     )
 
 
@@ -326,14 +216,14 @@ def _build_load_options(
             if trino_insert_chunk_size is not None
             else configured_trino_insert_chunk_size
         ),
-        ch_partition_by=_normalize_ch_columns_or_expression(
+        ch_partition_by=normalize_ch_columns_or_expression(
             ch_partition_by,
             "ch_partition_by",
         ),
-        ch_order_by=_normalize_ch_columns_or_expression(ch_order_by, "ch_order_by"),
-        ch_engine=_normalize_ch_string(ch_engine, "ch_engine"),
-        ch_cluster=_normalize_ch_string(ch_cluster, "ch_cluster"),
-        ch_sharding_key=_normalize_ch_string(ch_sharding_key, "sharding_key"),
+        ch_order_by=normalize_ch_columns_or_expression(ch_order_by, "ch_order_by"),
+        ch_engine=normalize_ch_string(ch_engine, "ch_engine"),
+        ch_cluster=normalize_ch_string(ch_cluster, "ch_cluster"),
+        ch_sharding_key=normalize_ch_string(ch_sharding_key, "sharding_key"),
         query_label=query_label,
     )
 
@@ -345,8 +235,15 @@ def _build_load_options(
         )
     if options.trino_insert_chunk_size is not None and options.trino_insert_chunk_size <= 0:
         raise ValueError("trino_insert_chunk_size must be a positive integer.")
-    if options.connection_backend != "ch":
-        _validate_ch_options_not_used(options)
+    validate_ch_options_not_used(
+        target_backend=options.connection_backend,
+        option_owner="connection_type",
+        ch_partition_by=options.ch_partition_by,
+        ch_order_by=options.ch_order_by,
+        ch_engine=options.ch_engine,
+        ch_cluster=options.ch_cluster,
+        ch_sharding_key=options.ch_sharding_key,
+    )
     return options
 
 
@@ -363,6 +260,202 @@ def _resolve_load_write_mode(
     if append and normalized != "append":
         raise ValueError("append=True cannot be combined with write_mode other than 'append'.")
     return normalized
+
+
+def _initialize_load_state(options: LoadOptions, connection: Any) -> LoadState:
+    return LoadState(
+        target_exists=table_exists(
+            options.connection_backend,
+            connection,
+            options.destination_table,
+            connection_key=options.connection_key,
+        )
+    )
+
+
+def _handle_empty_dataframe_load(
+    options: LoadOptions,
+    state: LoadState,
+    *,
+    return_metadata: bool,
+) -> int | SqlOperationResult:
+    if options.append and state.target_exists:
+        time_print(
+            f"Skipping empty DataFrame append into "
+            f"{options.connection_key}.{options.destination_table}"
+        )
+        if return_metadata:
+            return SqlOperationResult(
+                rows=0,
+                metadata=SqlOperationMetadata(
+                    source_rows=0,
+                    inserted_rows=0,
+                    affected_rows=0,
+                ),
+            )
+        return 0
+    raise ValueError("Cannot create or replace a table from an empty DataFrame.")
+
+
+def _validate_load_dataframe(options: LoadOptions, df: pd.DataFrame) -> None:
+    if options.gp_distributed_by_key:
+        validate_key_columns_in_columns(options.gp_distributed_by_key, df.columns)
+
+    validate_key_columns_in_columns(options.key_columns, df.columns)
+    validate_ch_columns_in_columns(
+        options.ch_partition_by,
+        df.columns,
+        "ch_partition_by",
+        data_name="staged data",
+    )
+    validate_ch_columns_in_columns(
+        options.ch_order_by,
+        df.columns,
+        "ch_order_by",
+        data_name="staged data",
+    )
+    _validate_dataframe_key_uniqueness(df, options.key_columns)
+
+
+def _prepare_load_target(
+    *,
+    options: LoadOptions,
+    state: LoadState,
+    connection: Any,
+    df: pd.DataFrame,
+) -> None:
+    _apply_load_target_write_mode(options, state, connection)
+    _ensure_load_target_table(options, state, connection, df)
+    _load_target_column_metadata(options, state, connection)
+
+
+def _apply_load_target_write_mode(
+    options: LoadOptions,
+    state: LoadState,
+    connection: Any,
+) -> None:
+    if options.write_mode == "append":
+        return
+
+    state.target_exists = apply_target_write_mode(
+        options.connection_backend,
+        connection,
+        options.destination_table,
+        write_mode=options.write_mode,
+        target_exists=state.target_exists,
+        replace_existing_non_ch="drop",
+        ch_cluster=options.ch_cluster,
+        connection_label=options.connection_key,
+        drop_missing_ch_truncate_target=False,
+        query_label=options.query_label,
+    )
+
+
+def _ensure_load_target_table(
+    options: LoadOptions,
+    state: LoadState,
+    connection: Any,
+    df: pd.DataFrame,
+) -> None:
+    if options.connection_backend == "ch":
+        _create_load_target_table(options, connection, df, distributed=True)
+        state.target_exists = True
+        return
+
+    if not state.target_exists:
+        _create_load_target_table(options, connection, df, distributed=False)
+
+
+def _create_load_target_table(
+    options: LoadOptions,
+    connection: Any,
+    df: pd.DataFrame,
+    *,
+    distributed: bool,
+) -> None:
+    create_kwargs: dict[str, Any] = {}
+    if options.query_label is not None:
+        create_kwargs["query_label"] = options.query_label
+
+    if distributed:
+        create_sql_table(
+            options.connection_backend,
+            connection,
+            options.destination_table,
+            df,
+            gp_distributed_by_key=options.gp_distributed_by_key,
+            ch_partition_by=options.ch_partition_by,
+            ch_order_by=options.ch_order_by,
+            ch_engine=options.ch_engine,
+            ch_cluster=options.ch_cluster,
+            ch_sharding_key=options.ch_sharding_key,
+            ch_distributed_table=True,
+            **create_kwargs,
+        )
+        return
+
+    create_sql_table(
+        options.connection_backend,
+        connection,
+        options.destination_table,
+        df,
+        gp_distributed_by_key=options.gp_distributed_by_key,
+        **create_kwargs,
+    )
+
+
+def _load_target_column_metadata(
+    options: LoadOptions,
+    state: LoadState,
+    connection: Any,
+) -> None:
+    if options.connection_backend == "trino":
+        state.target_column_types = get_trino_table_column_types(
+            connection,
+            options.destination_table,
+            connection_key=options.connection_key,
+        )
+
+
+def _analyze_load_target(options: LoadOptions, connection: Any) -> None:
+    if options.query_label is None:
+        analyze_table(
+            connection_type=options.connection_backend,
+            connection=connection,
+            table_name=options.destination_table,
+        )
+        return
+
+    analyze_table(
+        connection_type=options.connection_backend,
+        connection=connection,
+        table_name=options.destination_table,
+        query_label=options.query_label,
+    )
+
+
+def _build_load_result(
+    *,
+    options: LoadOptions,
+    state: LoadState,
+    connection: Any,
+    source_rows: int,
+    inserted_rows: int,
+    return_metadata: bool,
+) -> int | SqlOperationResult:
+    if not return_metadata:
+        return inserted_rows
+
+    return SqlOperationResult(
+        rows=inserted_rows,
+        metadata=_build_load_metadata(
+            options=options,
+            state=state,
+            connection=connection,
+            source_rows=source_rows,
+            inserted_rows=inserted_rows,
+        ),
+    )
 
 
 def build_load_df_plan(options: LoadOptions, df: pd.DataFrame) -> SqlPlan:
@@ -396,42 +489,28 @@ def build_load_df_plan(options: LoadOptions, df: pd.DataFrame) -> SqlPlan:
         return plan
 
     if options.write_mode == "replace":
-        if options.connection_backend == "ch":
-            plan.extend(
-                build_drop_ch_distributed_table_pair_sqls(
-                    options.destination_table,
-                    ch_cluster=options.ch_cluster,
-                    query_label=options.query_label,
-                ),
-                alias=options.connection_key,
-                backend=options.connection_backend,
-                phase="drop_target",
-                target_table=options.destination_table,
-            )
-        else:
-            plan.add(
-                build_drop_table_sql(
-                    options.connection_backend,
-                    options.destination_table,
-                    query_label=options.query_label,
-                ),
-                alias=options.connection_key,
-                backend=options.connection_backend,
-                phase="drop_target",
-                target_table=options.destination_table,
-            )
+        add_drop_target_steps(
+            plan,
+            alias=options.connection_key,
+            backend=options.connection_backend,
+            table_name=options.destination_table,
+            ch_cluster=options.ch_cluster,
+            query_label=options.query_label,
+        )
     elif options.write_mode == "truncate_insert":
-        for sql in _build_load_truncate_sqls(options):
-            plan.add(
-                sql,
-                alias=options.connection_key,
-                backend=options.connection_backend,
-                phase="clear_target",
-                target_table=options.destination_table,
-            )
+        add_clear_target_steps(
+            plan,
+            alias=options.connection_key,
+            backend=options.connection_backend,
+            table_name=options.destination_table,
+            query_label=options.query_label,
+            include_ch_shard=options.connection_backend == "ch",
+            ch_cluster=options.ch_cluster,
+        )
 
     if options.write_mode in {"replace", "truncate_insert"} or options.connection_backend == "ch":
-        plan.extend(
+        add_create_table_steps(
+            plan,
             build_create_table_sqls(
                 options.connection_backend,
                 options.destination_table,
@@ -447,14 +526,14 @@ def build_load_df_plan(options: LoadOptions, df: pd.DataFrame) -> SqlPlan:
             ),
             alias=options.connection_key,
             backend=options.connection_backend,
-            phase="create_target",
-            target_table=options.destination_table,
+            table_name=options.destination_table,
         )
 
     if options.append and options.key_columns:
         stage_table = f"{options.destination_table}__stage__dry_run"
         metadata.stage_table = stage_table
-        plan.extend(
+        add_create_table_steps(
+            plan,
             build_create_table_sqls(
                 options.connection_backend,
                 stage_table,
@@ -465,43 +544,35 @@ def build_load_df_plan(options: LoadOptions, df: pd.DataFrame) -> SqlPlan:
             alias=options.connection_key,
             backend=options.connection_backend,
             phase="create_stage",
-            target_table=stage_table,
+            table_name=stage_table,
         )
-        plan.add(
-            _build_dataframe_insert_placeholder(
+        add_load_stage_step(
+            plan,
+            alias=options.connection_key,
+            backend=options.connection_backend,
+            stage_table=stage_table,
+            sql=_build_dataframe_insert_placeholder(
                 options.connection_backend,
                 stage_table,
                 df,
             ),
-            alias=options.connection_key,
-            backend=options.connection_backend,
-            phase="load_stage",
-            target_table=stage_table,
             query_label=options.query_label,
         )
-        plan.add(
-            build_insert_from_table_sql(
-                options.connection_backend,
-                options.destination_table,
-                stage_table,
-                query_label=options.query_label,
-            ),
+        add_insert_from_stage_step(
+            plan,
             alias=options.connection_key,
             backend=options.connection_backend,
-            phase="insert_from_stage",
             target_table=options.destination_table,
-            source_table=stage_table,
+            stage_table=stage_table,
+            phase="insert_from_stage",
+            query_label=options.query_label,
         )
-        plan.add(
-            build_drop_table_sql(
-                options.connection_backend,
-                stage_table,
-                query_label=options.query_label,
-            ),
+        add_cleanup_stage_step(
+            plan,
             alias=options.connection_key,
             backend=options.connection_backend,
-            phase="drop_stage",
-            target_table=stage_table,
+            stage_table=stage_table,
+            query_label=options.query_label,
         )
     else:
         plan.add(
@@ -517,52 +588,21 @@ def build_load_df_plan(options: LoadOptions, df: pd.DataFrame) -> SqlPlan:
             query_label=options.query_label,
         )
 
-    if options.connection_backend != "ch":
-        plan.add(
-            build_analyze_table_sql(
-                options.connection_backend,
-                options.destination_table,
-                query_label=options.query_label,
-            ),
-            alias=options.connection_key,
-            backend=options.connection_backend,
-            phase="analyze",
-            target_table=options.destination_table,
-        )
-    plan.add(
-        build_count_table_rows_sql(
-            options.connection_backend,
-            options.destination_table,
-            query_label=options.query_label,
-        ),
+    add_analyze_step(
+        plan,
         alias=options.connection_key,
         backend=options.connection_backend,
-        phase="count_target",
-        target_table=options.destination_table,
+        table_name=options.destination_table,
+        query_label=options.query_label,
+    )
+    add_count_step(
+        plan,
+        alias=options.connection_key,
+        backend=options.connection_backend,
+        table_name=options.destination_table,
+        query_label=options.query_label,
     )
     return plan
-
-
-def _build_load_truncate_sqls(options: LoadOptions) -> list[str]:
-    if options.connection_backend != "ch":
-        return build_clear_table_sqls(
-            options.connection_backend,
-            options.destination_table,
-            query_label=options.query_label,
-        )
-    shard_table = build_ch_shard_table_name(options.destination_table)
-    return [
-        *build_clear_table_sqls(
-            "ch",
-            shard_table,
-            query_label=options.query_label,
-        ),
-        *build_clear_table_sqls(
-            "ch",
-            options.destination_table,
-            query_label=options.query_label,
-        ),
-    ]
 
 
 def _build_dataframe_insert_placeholder(
@@ -697,70 +737,6 @@ def _normalize_gp_distributed_by_key(
     if len(set(normalized)) != len(normalized):
         raise ValueError("gp_distributed_by_key must not contain duplicate column names.")
     return normalized
-
-
-def _normalize_ch_columns_or_expression(
-    value: Sequence[str] | str | None,
-    option_name: str,
-) -> list[str] | str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return _normalize_ch_string(value, option_name)
-
-    normalized = [_normalize_ch_string(column, option_name) for column in value]
-    if not normalized:
-        raise ValueError(f"{option_name} must not be empty when provided.")
-    if len(set(normalized)) != len(normalized):
-        raise ValueError(f"{option_name} must not contain duplicate column names.")
-    return normalized
-
-
-def _normalize_ch_string(value: str, option_name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"{option_name} must not be empty.")
-    return normalized
-
-
-def _validate_ch_options_not_used(options: LoadOptions) -> None:
-    if options.ch_partition_by is not None:
-        raise ValueError(
-            "ch_partition_by can only be used when connection_type has type 'ch'."
-        )
-    if options.ch_order_by is not None:
-        raise ValueError(
-            "ch_order_by can only be used when connection_type has type 'ch'."
-        )
-    if options.ch_engine != "ReplicatedMergeTree":
-        raise ValueError(
-            "ch_engine can only be used when connection_type has type 'ch'."
-        )
-    if options.ch_cluster != "{cluster}":
-        raise ValueError(
-            "ch_cluster can only be used when connection_type has type 'ch'."
-        )
-    if options.ch_sharding_key != "rand()":
-        raise ValueError(
-            "sharding_key can only be used when connection_type has type 'ch'."
-        )
-
-
-def _validate_ch_columns_in_dataframe(
-    value: list[str] | str | None,
-    columns: Sequence[str],
-    option_name: str,
-) -> None:
-    if value is None or isinstance(value, str):
-        return
-
-    available_columns = {str(column) for column in columns}
-    missing_columns = [column for column in value if column not in available_columns]
-    if missing_columns:
-        raise ValueError(
-            f"{option_name} columns were not found in the staged data: "
-            + ", ".join(missing_columns)
-        )
 
 
 def _validate_dataframe_key_uniqueness(

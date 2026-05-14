@@ -6,6 +6,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from .outliers import _apply_outliers_to_agg_ratio_components, _apply_outliers_to_values
 from .ratio import _build_agg_ratio_linearized_values, _build_ratio_valid_mask
 from .stats import (
     _compute_group_diff_standard_error,
@@ -23,6 +24,8 @@ def _compute_cuped_p_value(
     baseline_group: str,
     test_group: str,
     metric_definition: dict[str, object],
+    outlier_context: dict[str, object] | None = None,
+    pre_outlier_context: dict[str, object] | None = None,
 ) -> float:
     p_value, _ = _compute_cuped_statistics(
         df=df,
@@ -32,6 +35,8 @@ def _compute_cuped_p_value(
         baseline_group=baseline_group,
         test_group=test_group,
         metric_definition=metric_definition,
+        outlier_context=outlier_context,
+        pre_outlier_context=pre_outlier_context,
     )
     return p_value
 
@@ -44,6 +49,8 @@ def _compute_cuped_statistics(
     baseline_group: str,
     test_group: str,
     metric_definition: dict[str, object],
+    outlier_context: dict[str, object] | None = None,
+    pre_outlier_context: dict[str, object] | None = None,
 ) -> tuple[float, float]:
     cuped_frame, reason = _build_cuped_frame(
         df=df,
@@ -53,6 +60,8 @@ def _compute_cuped_statistics(
         baseline_group=baseline_group,
         test_group=test_group,
         metric_definition=metric_definition,
+        outlier_context=outlier_context,
+        pre_outlier_context=pre_outlier_context,
     )
     metric_name = str(metric_definition["metric_key"])
     if reason is not None:
@@ -92,6 +101,8 @@ def _build_cuped_frame(
     baseline_group: str,
     test_group: str,
     metric_definition: dict[str, object],
+    outlier_context: dict[str, object] | None = None,
+    pre_outlier_context: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame | None, str | None]:
     comparison_mask = df[group_column].isin([baseline_group, test_group])
     comparison_df = df.loc[comparison_mask, [user_id_column, group_column]].copy()
@@ -101,6 +112,7 @@ def _build_cuped_frame(
         user_id_column=user_id_column,
         metric_definition=metric_definition,
         value_column="metric_exp",
+        outlier_context=outlier_context,
     )
     if exp_error is not None:
         return None, f"experiment metric values are unavailable: {exp_error}"
@@ -110,6 +122,7 @@ def _build_cuped_frame(
         user_id_column=user_id_column,
         metric_definition=metric_definition,
         value_column="metric_pre",
+        outlier_context=pre_outlier_context,
     )
     if pre_error is not None:
         return None, f"pre-experiment metric values are unavailable: {pre_error}"
@@ -131,12 +144,14 @@ def _build_metric_values_by_user(
     user_id_column: str,
     metric_definition: dict[str, object],
     value_column: str,
+    outlier_context: dict[str, object] | None = None,
 ) -> tuple[pd.DataFrame, str | None]:
     if metric_definition["kind"] == "mean":
         metric_name = str(metric_definition["column"])
         if metric_name not in df.columns:
             return pd.DataFrame(columns=[user_id_column, value_column]), f"missing column '{metric_name}'"
         values = _get_numeric_metric_series(df, metric_name)
+        values, _ = _apply_outliers_to_values(values, outlier_context)
         return pd.DataFrame({user_id_column: df[user_id_column].to_numpy(), value_column: values.to_numpy()}), None
 
     ratio_spec = dict(metric_definition["ratio_spec"])
@@ -161,8 +176,14 @@ def _build_metric_values_by_user(
         )
         values = pd.Series(np.nan, index=df.index, dtype=float)
         values.loc[valid_mask] = numerator.loc[valid_mask] / denominator.loc[valid_mask]
+        values, _ = _apply_outliers_to_values(values, outlier_context)
         return pd.DataFrame({user_id_column: df[user_id_column].to_numpy(), value_column: values.to_numpy()}), None
 
+    numerator, denominator, _ = _apply_outliers_to_agg_ratio_components(
+        numerator=numerator,
+        denominator=denominator,
+        outlier_context=outlier_context,
+    )
     values, error = _build_agg_ratio_linearized_values(
         numerator=numerator,
         denominator=denominator,
