@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .api import compute_test_metrics
+from .parallel import parallel_compute_metrics
 from .bootstrap import (
     _apply_multiple_comparisons_adjustment,
     _compute_bootstrap_family_max_statistics,
@@ -83,6 +84,7 @@ __all__ = [
     "DEFAULT_ALPHA",
     "DEFAULT_POWER",
     "compute_test_metrics",
+    "parallel_compute_metrics",
     "_apply_multiple_comparisons_adjustment",
     "_apply_outliers_to_agg_ratio_components",
     "_apply_outliers_to_values",

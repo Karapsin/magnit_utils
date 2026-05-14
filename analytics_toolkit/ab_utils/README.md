@@ -5,6 +5,7 @@ Helpers for AB-test related workflows.
 ## Available Helpers
 
 - `compute_test_metrics`: compare experiment groups across all metric columns in a dataframe
+- `parallel_compute_metrics`: run named `compute_test_metrics` tasks concurrently
 
 ## Notes
 
@@ -71,6 +72,27 @@ Other function options:
 - `bootstrap_random_state=0`: bootstrap RNG seed; set `None` for non-deterministic resampling
 - `bootstrap_n_jobs=1`: number of worker executors for bootstrap batches
 - `bootstrap_progress=False`: when `True`, show a `tqdm` progress bar for bootstrap resamples
+
+Run independent metric jobs in parallel with `parallel_compute_metrics`:
+
+```python
+result = parallel_compute_metrics(
+    {
+        "segment_1": {
+            "df": segment_1_df,
+            "pre_exp_df": segment_1_pre_df,
+            "labels": {"segment": "segment1"},
+            "test_vs_test": False,
+        },
+        "segment_2": {
+            "df": segment_2_df,
+            "labels": {"segment": "segment2"},
+            "test_vs_test": False,
+        },
+    },
+    concurrency=2,
+)
+```
 
 Output notes:
 
