@@ -60,66 +60,65 @@ operation from the beginning with a fresh connection.
 the provided SQL into statements, executes every statement except the last, then
 reads the last statement into a pandas dataframe on the same connection.
 
-`async_sql` accepts a non-empty mapping of task name to task spec. Each spec
+`async_sql` is a synchronous public function: call it directly and it returns a
+result dictionary. It accepts a non-empty sequence of task specs. Each spec
 declares a `type` (`read`, `execute`, `execute_read`, `load_df`, `transfer`, or
 `custom_sql_pipeline`). SQL task specs pass the same keyword arguments as the
-matching sync function. It uses `asyncio.to_thread`, so sync work runs
-concurrently with fresh operations; it does not parallelize an individual SQL
-statement internally. Result keys follow the input task order. With
-`fail_fast=True`, the first raised task exception is raised and pending awaits
-are cancelled; already-running sync work can continue until that function exits.
-With `fail_fast=False`, exceptions are returned under their task names.
+matching sync function. Add an optional `name` field to control the result key;
+unnamed tasks are keyed as `task_0`, `task_1`, and so on. It uses
+`asyncio.to_thread` internally, so sync work runs concurrently with fresh
+operations; it does not parallelize an individual SQL statement internally.
+Result keys follow the input task order. With `fail_fast=True`, the first raised
+task exception is raised and pending tasks are cancelled; already-running sync
+work can continue until that function exits. With `fail_fast=False`, exceptions
+are returned under their task names.
 
-`soft_concurrency_cap` limits actual sync worker execution across nested
-`async_sql` calls in the same async task chain. When omitted on a top-level call,
-it defaults to that call's `concurrency`. Nested calls inherit the active soft
-cap unless they pass a lower `soft_concurrency_cap` for that subtree.
-`hard_concurrency_cap` defaults to `10` and rejects calls only when actual
-possible worker execution after soft throttling would exceed the hard cap.
-Lowering `soft_concurrency_cap` is therefore a valid way to run a large requested
-batch without exceeding the hard cap.
+`soft_concurrency_cap` limits actual sync worker execution. When omitted, it
+defaults to `concurrency`. `hard_concurrency_cap` defaults to `10` and rejects
+calls only when actual possible worker execution after soft throttling would
+exceed the hard cap. Lowering `soft_concurrency_cap` is therefore a valid way to
+run a large requested batch without exceeding the hard cap.
 
 ```python
-import asyncio
-
 import pandas as pd
 from analytics_toolkit import sql
 
-result = asyncio.run(
-    sql.async_sql(
-        {
-            "users": {
-                "type": "read",
-                "connection_type": "gp",
-                "query": "select user_id, segment from sandbox.users",
-                "print_queries": False,
-            },
-            "refresh_summary": {
-                "type": "execute",
-                "connection_type": "gp",
-                "query": "truncate table sandbox.summary",
-                "gp_break_query": True,
-            },
-            "load_scores": {
-                "type": "load_df",
-                "connection_type": "ch",
-                "destination_table": "sandbox.scores",
-                "df": pd.DataFrame({"user_id": [1], "score": [10]}),
-                "append": False,
-                "ch_order_by": ["user_id"],
-            },
-            "copy_events": {
-                "type": "transfer",
-                "from_db": "trino",
-                "to_db": "gp_sandbox",
-                "from_sql": "select * from iceberg.events.daily",
-                "to_table": "sandbox.events_daily",
-                "batch_size": 50_000,
-            },
-        },
-        concurrency=3,
-    )
-)
+tasks = [
+    {
+        "name": "users",
+        "type": "read",
+        "connection_type": "gp",
+        "query": "select user_id, segment from sandbox.users",
+        "print_queries": False,
+    },
+    {
+        "name": "refresh_summary",
+        "type": "execute",
+        "connection_type": "gp",
+        "query": "truncate table sandbox.summary",
+        "gp_break_query": True,
+    },
+    {
+        "name": "load_scores",
+        "type": "load_df",
+        "connection_type": "ch",
+        "destination_table": "sandbox.scores",
+        "df": pd.DataFrame({"user_id": [1], "score": [10]}),
+        "append": False,
+        "ch_order_by": ["user_id"],
+    },
+    {
+        "name": "copy_events",
+        "type": "transfer",
+        "from_db": "trino",
+        "to_db": "gp_sandbox",
+        "from_sql": "select * from iceberg.events.daily",
+        "to_table": "sandbox.events_daily",
+        "batch_size": 50_000,
+    },
+]
+
+result = sql.async_sql(tasks, concurrency=3)
 
 users_df = result["users"]
 loaded_rows = result["load_scores"]
@@ -155,39 +154,40 @@ def transfer_if_not_empty(context):
     )
 
 
-result = asyncio.run(
-    sql.async_sql(
+result = sql.async_sql(
+    [
         {
-            "source_copy": {
-                "type": "custom_sql_pipeline",
-                "steps": [read_row_count, transfer_if_not_empty],
-            }
-        },
-        concurrency=3,
-    )
+            "name": "source_copy",
+            "type": "custom_sql_pipeline",
+            "steps": [read_row_count, transfer_if_not_empty],
+        }
+    ],
+    concurrency=3,
 )
 ```
 
-Async pipeline steps can launch nested batches. The nested call below requests
-two-way concurrency and inherits the outer soft cap:
+Pipeline steps can launch nested batches. The nested call below requests
+two-way concurrency:
 
 ```python
-async def load_parts_in_parallel(context):
-    return await sql.async_sql(
-        {
-            "load_a": {
+def load_parts_in_parallel(context):
+    return sql.async_sql(
+        [
+            {
+                "name": "load_a",
                 "type": "load_df",
                 "connection_type": "gp",
                 "destination_table": "sandbox.part_a",
                 "df": df_a,
             },
-            "load_b": {
+            {
+                "name": "load_b",
                 "type": "load_df",
                 "connection_type": "gp",
                 "destination_table": "sandbox.part_b",
                 "df": df_b,
             },
-        },
+        ],
         concurrency=2,
     )
 
@@ -205,44 +205,14 @@ def finalize_parts(context):
     )
 ```
 
-For larger nested batches, requested concurrency can exceed the hard cap as long
-as the soft cap keeps actual sync worker execution within the hard cap. This
-runs successfully because the outer soft cap defaults to `concurrency=2`, even
-though each nested batch requests `concurrency=6`:
-
-```python
-async def load_many_parts(context):
-    return await sql.async_sql(many_load_tasks, concurrency=6)
-
-
-result = asyncio.run(
-    sql.async_sql(
-        {
-            "parts_a": {
-                "type": "custom_sql_pipeline",
-                "steps": [load_many_parts, finalize_parts],
-            },
-            "parts_b": {
-                "type": "custom_sql_pipeline",
-                "steps": [load_many_parts, finalize_parts],
-            },
-        },
-        concurrency=2,
-        hard_concurrency_cap=10,
-    )
-)
-```
-
 For a single large top-level batch, set an explicit soft cap below the hard cap:
 
 ```python
-result = asyncio.run(
-    sql.async_sql(
-        many_load_tasks,
-        concurrency=20,
-        soft_concurrency_cap=5,
-        hard_concurrency_cap=10,
-    )
+result = sql.async_sql(
+    many_load_tasks,
+    concurrency=20,
+    soft_concurrency_cap=5,
+    hard_concurrency_cap=10,
 )
 ```
 

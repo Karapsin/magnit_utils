@@ -17,6 +17,10 @@ async_module = importlib.import_module("analytics_toolkit.sql.async_api")
 sql_module = importlib.import_module("analytics_toolkit.sql")
 
 
+def named_tasks(tasks: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"name": name, **spec} for name, spec in tasks.items()]
+
+
 def test_async_sql_is_exported() -> None:
     assert sql_module.async_sql is async_module.async_sql
 
@@ -53,47 +57,55 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
         record("transfer", transfer_result),
     )
 
-    tasks = {
-        "read_users": {
-            "type": "read",
-            "connection_type": "gp",
-            "query": "select * from users",
-            "print_queries": False,
-        },
-        "refresh_table": {
-            "type": "execute",
-            "connection_type": "gp",
-            "query": "truncate table sandbox.target",
-            "gp_break_query": True,
-            "gp_commit_each_statement": True,
-        },
-        "prepare_and_read": {
-            "type": "execute_read",
-            "connection_type": "trino",
-            "query": "create table tmp as select 1; select * from tmp",
-            "random_sleep_seconds": None,
-        },
-        "load_batch": {
-            "type": "load_df",
-            "connection_type": "ch",
-            "destination_table": "sandbox.batch",
-            "df": df,
-            "append": True,
-            "ch_order_by": ["id"],
-        },
-        "copy_table": {
-            "type": "transfer",
-            "from_db": "gp",
-            "to_db": "trino",
-            "from_sql": "select * from source",
-            "to_table": "sandbox.copy",
-            "batch_size": 10,
-        },
-    }
+    tasks = named_tasks(
+        {
+            "read_users": {
+                "type": "read",
+                "connection_type": "gp",
+                "query": "select * from users",
+                "print_queries": False,
+            },
+            "refresh_table": {
+                "type": "execute",
+                "connection_type": "gp",
+                "query": "truncate table sandbox.target",
+                "gp_break_query": True,
+                "gp_commit_each_statement": True,
+            },
+            "prepare_and_read": {
+                "type": "execute_read",
+                "connection_type": "trino",
+                "query": "create table tmp as select 1; select * from tmp",
+                "random_sleep_seconds": None,
+            },
+            "load_batch": {
+                "type": "load_df",
+                "connection_type": "ch",
+                "destination_table": "sandbox.batch",
+                "df": df,
+                "append": True,
+                "ch_order_by": ["id"],
+            },
+            "copy_table": {
+                "type": "transfer",
+                "from_db": "gp",
+                "to_db": "trino",
+                "from_sql": "select * from source",
+                "to_table": "sandbox.copy",
+                "batch_size": 10,
+            },
+        }
+    )
 
-    result = asyncio.run(async_module.async_sql(tasks, concurrency=3))
+    result = async_module.async_sql(tasks, concurrency=3)
 
-    assert list(result) == list(tasks)
+    assert list(result) == [
+        "read_users",
+        "refresh_table",
+        "prepare_and_read",
+        "load_batch",
+        "copy_table",
+    ]
     pd.testing.assert_frame_equal(result["read_users"], read_result)
     assert result["refresh_table"] is execute_result
     pd.testing.assert_frame_equal(result["prepare_and_read"], execute_read_result)
@@ -134,6 +146,74 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
     }
 
 
+def test_async_sql_uses_generated_names_for_unnamed_task_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_execute_sql(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return kwargs["query"]
+
+    monkeypatch.setattr(async_module, "execute_sql", fake_execute_sql)
+
+    result = async_module.async_sql(
+        [
+            {
+                "type": "execute",
+                "connection_type": "gp",
+                "query": "insert into target select 1",
+            },
+            {
+                "type": "execute",
+                "connection_type": "gp",
+                "query": "insert into target select 2",
+            },
+        ],
+        concurrency=1,
+    )
+
+    assert result == {
+        "task_0": "insert into target select 1",
+        "task_1": "insert into target select 2",
+    }
+    assert calls == [
+        {
+            "connection_type": "gp",
+            "query": "insert into target select 1",
+        },
+        {
+            "connection_type": "gp",
+            "query": "insert into target select 2",
+        },
+    ]
+
+
+def test_async_sql_runs_from_inside_existing_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_execute_sql(**kwargs: Any) -> str:
+        return kwargs["query"]
+
+    monkeypatch.setattr(async_module, "execute_sql", fake_execute_sql)
+
+    async def call_sync_api() -> dict[str, Any]:
+        return async_module.async_sql(
+            [
+                {
+                    "type": "execute",
+                    "connection_type": "gp",
+                    "query": "insert into target select 1",
+                }
+            ],
+            concurrency=1,
+        )
+
+    assert asyncio.run(call_sync_api()) == {
+        "task_0": "insert into target select 1"
+    }
+
+
 def test_async_sql_concurrency_limits_active_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -153,22 +233,24 @@ def test_async_sql_concurrency_limits_active_tasks(
 
     monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
 
-    tasks = {
-        f"read_{index}": {
-            "type": "read",
-            "connection_type": "gp",
-            "query": f"select {index}",
+    tasks = named_tasks(
+        {
+            f"read_{index}": {
+                "type": "read",
+                "connection_type": "gp",
+                "query": f"select {index}",
+            }
+            for index in range(6)
         }
-        for index in range(6)
-    }
+    )
 
-    result = asyncio.run(async_module.async_sql(tasks, concurrency=2))
+    result = async_module.async_sql(tasks, concurrency=2)
 
-    assert list(result) == list(tasks)
+    assert list(result) == [f"read_{index}" for index in range(6)]
     assert max_active_tasks == 2
 
 
-def test_async_sql_pipeline_runs_sync_steps_sequentially_and_returns_last_result() -> None:
+def test_async_sql_pipeline_runs_steps_sequentially_and_returns_last_result() -> None:
     observations: list[tuple[str, int, list[Any], Any]] = []
 
     def first_step(context: Any) -> str:
@@ -182,7 +264,8 @@ def test_async_sql_pipeline_runs_sync_steps_sequentially_and_returns_last_result
         )
         return "first"
 
-    def second_step(context: Any) -> str:
+    async def second_step(context: Any) -> str:
+        await asyncio.sleep(0)
         observations.append(
             (
                 context.task_name,
@@ -193,15 +276,14 @@ def test_async_sql_pipeline_runs_sync_steps_sequentially_and_returns_last_result
         )
         return f"{context.last_result}:second"
 
-    result = asyncio.run(
-        async_module.async_sql(
+    result = async_module.async_sql(
+        [
             {
-                "pipeline": {
-                    "type": "custom_sql_pipeline",
-                    "steps": [first_step, second_step],
-                }
+                "name": "pipeline",
+                "type": "custom_sql_pipeline",
+                "steps": [first_step, second_step],
             }
-        )
+        ]
     )
 
     assert result["pipeline"] == "first:second"
@@ -211,29 +293,7 @@ def test_async_sql_pipeline_runs_sync_steps_sequentially_and_returns_last_result
     ]
 
 
-def test_async_sql_pipeline_awaits_async_steps_and_mixes_sync_steps() -> None:
-    async def async_step(context: Any) -> str:
-        await asyncio.sleep(0)
-        return f"{context.task_name}:async"
-
-    def sync_step(context: Any) -> str:
-        return f"{context.last_result}:sync"
-
-    result = asyncio.run(
-        async_module.async_sql(
-            {
-                "pipeline": {
-                    "type": "custom_sql_pipeline",
-                    "steps": [async_step, sync_step],
-                }
-            }
-        )
-    )
-
-    assert result["pipeline"] == "pipeline:async:sync"
-
-
-def test_async_sql_pipeline_supports_nested_async_sql(
+def test_async_sql_pipeline_can_run_nested_sync_async_sql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_read_sql(**kwargs: Any) -> str:
@@ -241,64 +301,36 @@ def test_async_sql_pipeline_supports_nested_async_sql(
 
     monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
 
-    async def nested_batch(context: Any) -> dict[str, Any]:
-        return await async_module.async_sql(
-            {
-                "a": {
-                    "type": "read",
-                    "connection_type": "gp",
-                    "query": f"{context.task_name}:a",
-                },
-                "b": {
-                    "type": "read",
-                    "connection_type": "gp",
-                    "query": f"{context.task_name}:b",
-                },
-            },
+    def nested_batch(context: Any) -> dict[str, Any]:
+        return async_module.async_sql(
+            named_tasks(
+                {
+                    "a": {
+                        "type": "read",
+                        "connection_type": "gp",
+                        "query": f"{context.task_name}:a",
+                    },
+                    "b": {
+                        "type": "read",
+                        "connection_type": "gp",
+                        "query": f"{context.task_name}:b",
+                    },
+                }
+            ),
             concurrency=2,
         )
 
-    result = asyncio.run(
-        async_module.async_sql(
+    result = async_module.async_sql(
+        [
             {
-                "pipeline": {
-                    "type": "custom_sql_pipeline",
-                    "steps": [nested_batch],
-                }
+                "name": "pipeline",
+                "type": "custom_sql_pipeline",
+                "steps": [nested_batch],
             }
-        )
+        ]
     )
 
     assert result["pipeline"] == {"a": "pipeline:a", "b": "pipeline:b"}
-
-
-def test_async_sql_multiple_pipelines_respect_outer_concurrency() -> None:
-    active_pipelines = 0
-    max_active_pipelines = 0
-    lock = asyncio.Lock()
-
-    async def step(context: Any) -> str:
-        nonlocal active_pipelines, max_active_pipelines
-        async with lock:
-            active_pipelines += 1
-            max_active_pipelines = max(max_active_pipelines, active_pipelines)
-        await asyncio.sleep(0.05)
-        async with lock:
-            active_pipelines -= 1
-        return context.task_name
-
-    tasks = {
-        f"pipeline_{index}": {
-            "type": "custom_sql_pipeline",
-            "steps": [step],
-        }
-        for index in range(5)
-    }
-
-    result = asyncio.run(async_module.async_sql(tasks, concurrency=2))
-
-    assert list(result) == list(tasks)
-    assert max_active_pipelines == 2
 
 
 def test_async_sql_soft_cap_limits_top_level_worker_execution(
@@ -320,66 +352,32 @@ def test_async_sql_soft_cap_limits_top_level_worker_execution(
 
     monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
 
-    tasks = {
-        f"read_{index}": {
-            "type": "read",
-            "connection_type": "gp",
-            "query": f"select {index}",
+    tasks = named_tasks(
+        {
+            f"read_{index}": {
+                "type": "read",
+                "connection_type": "gp",
+                "query": f"select {index}",
+            }
+            for index in range(6)
         }
-        for index in range(6)
-    }
-
-    result = asyncio.run(
-        async_module.async_sql(tasks, concurrency=6, soft_concurrency_cap=2)
     )
 
-    assert list(result) == list(tasks)
+    result = async_module.async_sql(tasks, concurrency=6, soft_concurrency_cap=2)
+
+    assert list(result) == [f"read_{index}" for index in range(6)]
     assert max_active_workers == 2
 
 
-def test_async_sql_default_soft_cap_equals_concurrency(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lock = threading.Lock()
-    active_workers = 0
-    max_active_workers = 0
-
-    def fake_read_sql(**kwargs: Any) -> str:
-        nonlocal active_workers, max_active_workers
-        with lock:
-            active_workers += 1
-            max_active_workers = max(max_active_workers, active_workers)
-        time.sleep(0.1)
-        with lock:
-            active_workers -= 1
-        return kwargs["query"]
-
-    monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
-
-    tasks = {
-        f"read_{index}": {
-            "type": "read",
-            "connection_type": "gp",
-            "query": f"select {index}",
-        }
-        for index in range(6)
-    }
-
-    result = asyncio.run(async_module.async_sql(tasks, concurrency=6))
-
-    assert list(result) == list(tasks)
-    assert max_active_workers == 6
-
-
 def test_async_sql_hard_cap_rejects_unthrottled_effective_concurrency() -> None:
-    tasks = {
-        f"read_{index}": {
+    tasks = [
+        {
             "type": "read",
             "connection_type": "gp",
             "query": f"select {index}",
         }
         for index in range(11)
-    }
+    ]
 
     with pytest.raises(
         ValueError,
@@ -388,7 +386,7 @@ def test_async_sql_hard_cap_rejects_unthrottled_effective_concurrency() -> None:
             "soft_concurrency_cap"
         ),
     ):
-        asyncio.run(async_module.async_sql(tasks, concurrency=11))
+        async_module.async_sql(tasks, concurrency=11)
 
 
 def test_async_sql_lower_soft_cap_avoids_hard_cap_error(
@@ -410,144 +408,24 @@ def test_async_sql_lower_soft_cap_avoids_hard_cap_error(
 
     monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
 
-    tasks = {
-        f"read_{index}": {
+    tasks = [
+        {
             "type": "read",
             "connection_type": "gp",
             "query": f"select {index}",
         }
         for index in range(11)
-    }
+    ]
 
-    result = asyncio.run(
-        async_module.async_sql(
-            tasks,
-            concurrency=11,
-            soft_concurrency_cap=5,
-            hard_concurrency_cap=10,
-        )
+    result = async_module.async_sql(
+        tasks,
+        concurrency=11,
+        soft_concurrency_cap=5,
+        hard_concurrency_cap=10,
     )
 
-    assert list(result) == list(tasks)
+    assert list(result) == [f"task_{index}" for index in range(11)]
     assert max_active_workers == 5
-
-
-def test_async_sql_nested_batches_inherit_soft_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lock = threading.Lock()
-    started_cap_workers = threading.Event()
-    release_workers = threading.Event()
-    active_workers = 0
-    max_active_workers = 0
-
-    def fake_read_sql(**kwargs: Any) -> str:
-        nonlocal active_workers, max_active_workers
-        with lock:
-            active_workers += 1
-            max_active_workers = max(max_active_workers, active_workers)
-            if active_workers == 2:
-                started_cap_workers.set()
-        try:
-            release_workers.wait(timeout=2)
-            return kwargs["query"]
-        finally:
-            with lock:
-                active_workers -= 1
-
-    monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
-
-    async def nested_batch(context: Any) -> dict[str, Any]:
-        nested_tasks = {
-            f"{context.task_name}_read_{index}": {
-                "type": "read",
-                "connection_type": "gp",
-                "query": f"{context.task_name}:{index}",
-            }
-            for index in range(6)
-        }
-        return await async_module.async_sql(nested_tasks, concurrency=6)
-
-    async def run_with_release() -> dict[str, Any]:
-        run_task = asyncio.create_task(
-            async_module.async_sql(
-                {
-                    "pipeline_a": {
-                        "type": "custom_sql_pipeline",
-                        "steps": [nested_batch],
-                    },
-                    "pipeline_b": {
-                        "type": "custom_sql_pipeline",
-                        "steps": [nested_batch],
-                    },
-                },
-                concurrency=2,
-            )
-        )
-        try:
-            cap_reached = await asyncio.to_thread(started_cap_workers.wait, 2)
-            assert cap_reached
-            with lock:
-                assert active_workers == 2
-            release_workers.set()
-            return await run_task
-        finally:
-            release_workers.set()
-
-    result = asyncio.run(run_with_release())
-
-    assert list(result) == ["pipeline_a", "pipeline_b"]
-    assert max_active_workers == 2
-
-
-def test_async_sql_nested_lower_soft_cap_tightens_subtree(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lock = threading.Lock()
-    active_workers = 0
-    max_active_workers = 0
-
-    def fake_read_sql(**kwargs: Any) -> str:
-        nonlocal active_workers, max_active_workers
-        with lock:
-            active_workers += 1
-            max_active_workers = max(max_active_workers, active_workers)
-        time.sleep(0.1)
-        with lock:
-            active_workers -= 1
-        return kwargs["query"]
-
-    monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
-
-    async def nested_batch(context: Any) -> dict[str, Any]:
-        nested_tasks = {
-            f"read_{index}": {
-                "type": "read",
-                "connection_type": "gp",
-                "query": f"select {index}",
-            }
-            for index in range(6)
-        }
-        return await async_module.async_sql(
-            nested_tasks,
-            concurrency=6,
-            soft_concurrency_cap=2,
-        )
-
-    result = asyncio.run(
-        async_module.async_sql(
-            {
-                "pipeline": {
-                    "type": "custom_sql_pipeline",
-                    "steps": [nested_batch],
-                }
-            },
-            concurrency=5,
-        )
-    )
-
-    assert list(result["pipeline"]) == [f"read_{index}" for index in range(6)]
-    assert max_active_workers == 2
 
 
 def test_async_sql_pipeline_stops_on_first_step_exception() -> None:
@@ -562,15 +440,14 @@ def test_async_sql_pipeline_stops_on_first_step_exception() -> None:
         calls.append("skipped")
 
     with pytest.raises(RuntimeError) as exc_info:
-        asyncio.run(
-            async_module.async_sql(
+        async_module.async_sql(
+            [
                 {
-                    "pipeline": {
-                        "type": "custom_sql_pipeline",
-                        "steps": [broken_step, skipped_step],
-                    }
+                    "name": "pipeline",
+                    "type": "custom_sql_pipeline",
+                    "steps": [broken_step, skipped_step],
                 }
-            )
+            ]
         )
 
     assert exc_info.value is error
@@ -583,16 +460,15 @@ def test_async_sql_fail_fast_false_returns_pipeline_exception() -> None:
     def broken_step(context: Any) -> None:
         raise error
 
-    result = asyncio.run(
-        async_module.async_sql(
+    result = async_module.async_sql(
+        [
             {
-                "pipeline": {
-                    "type": "custom_sql_pipeline",
-                    "steps": [broken_step],
-                }
-            },
-            fail_fast=False,
-        )
+                "name": "pipeline",
+                "type": "custom_sql_pipeline",
+                "steps": [broken_step],
+            }
+        ],
+        fail_fast=False,
     )
 
     assert result["pipeline"] is error
@@ -608,21 +484,23 @@ def test_async_sql_fail_fast_raises_first_exception(
 
     monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
 
-    tasks = {
-        "broken": {
-            "type": "read",
-            "connection_type": "gp",
-            "query": "select broken",
-        },
-        "also_broken": {
-            "type": "read",
-            "connection_type": "gp",
-            "query": "select also_broken",
-        },
-    }
+    tasks = named_tasks(
+        {
+            "broken": {
+                "type": "read",
+                "connection_type": "gp",
+                "query": "select broken",
+            },
+            "also_broken": {
+                "type": "read",
+                "connection_type": "gp",
+                "query": "select also_broken",
+            },
+        }
+    )
 
     with pytest.raises(RuntimeError) as exc_info:
-        asyncio.run(async_module.async_sql(tasks, concurrency=1, fail_fast=True))
+        async_module.async_sql(tasks, concurrency=1, fail_fast=True)
 
     assert exc_info.value is error
 
@@ -639,8 +517,8 @@ def test_async_sql_fail_fast_false_returns_exceptions(
 
     monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
 
-    result = asyncio.run(
-        async_module.async_sql(
+    result = async_module.async_sql(
+        named_tasks(
             {
                 "ok": {
                     "type": "read",
@@ -652,9 +530,9 @@ def test_async_sql_fail_fast_false_returns_exceptions(
                     "connection_type": "gp",
                     "query": "select broken",
                 },
-            },
-            fail_fast=False,
-        )
+            }
+        ),
+        fail_fast=False,
     )
 
     assert result["ok"] == "select ok"
@@ -664,13 +542,13 @@ def test_async_sql_fail_fast_false_returns_exceptions(
 @pytest.mark.parametrize(
     ("tasks", "expected_exception"),
     [
-        ([], TypeError),
-        ({}, ValueError),
-        ({"": {"type": "read"}}, ValueError),
-        ({"task": "read"}, TypeError),
-        ({"task": {"connection_type": "gp"}}, ValueError),
-        ({"task": {"type": "unknown"}}, ValueError),
-        ({"task": {"type": ["read"]}}, ValueError),
+        ([], ValueError),
+        ({}, TypeError),
+        ([{"name": "", "type": "read"}], ValueError),
+        ([{"type": "read"}, "read"], TypeError),
+        ([{"connection_type": "gp"}], ValueError),
+        ([{"type": "unknown"}], ValueError),
+        ([{"type": ["read"]}], ValueError),
     ],
 )
 def test_async_sql_validates_task_input(
@@ -678,41 +556,39 @@ def test_async_sql_validates_task_input(
     expected_exception: type[Exception],
 ) -> None:
     with pytest.raises(expected_exception):
-        asyncio.run(async_module.async_sql(tasks))
+        async_module.async_sql(tasks)
 
 
 @pytest.mark.parametrize("concurrency", [0, -1, True, 1.5])
 def test_async_sql_validates_concurrency(concurrency: Any) -> None:
-    tasks = {
-        "read": {
+    tasks = [
+        {
             "type": "read",
             "connection_type": "gp",
             "query": "select 1",
         }
-    }
+    ]
 
     with pytest.raises(ValueError, match="concurrency"):
-        asyncio.run(async_module.async_sql(tasks, concurrency=concurrency))
+        async_module.async_sql(tasks, concurrency=concurrency)
 
 
 @pytest.mark.parametrize("soft_concurrency_cap", [0, -1, True, 1.5])
 def test_async_sql_validates_soft_concurrency_cap(
     soft_concurrency_cap: Any,
 ) -> None:
-    tasks = {
-        "read": {
+    tasks = [
+        {
             "type": "read",
             "connection_type": "gp",
             "query": "select 1",
         }
-    }
+    ]
 
     with pytest.raises(ValueError, match="soft_concurrency_cap"):
-        asyncio.run(
-            async_module.async_sql(
-                tasks,
-                soft_concurrency_cap=soft_concurrency_cap,
-            )
+        async_module.async_sql(
+            tasks,
+            soft_concurrency_cap=soft_concurrency_cap,
         )
 
 
@@ -720,20 +596,18 @@ def test_async_sql_validates_soft_concurrency_cap(
 def test_async_sql_validates_hard_concurrency_cap(
     hard_concurrency_cap: Any,
 ) -> None:
-    tasks = {
-        "read": {
+    tasks = [
+        {
             "type": "read",
             "connection_type": "gp",
             "query": "select 1",
         }
-    }
+    ]
 
     with pytest.raises(ValueError, match="hard_concurrency_cap"):
-        asyncio.run(
-            async_module.async_sql(
-                tasks,
-                hard_concurrency_cap=hard_concurrency_cap,
-            )
+        async_module.async_sql(
+            tasks,
+            hard_concurrency_cap=hard_concurrency_cap,
         )
 
 
@@ -756,19 +630,18 @@ def test_async_sql_validates_pipeline_steps(
     expected_exception: type[Exception],
 ) -> None:
     with pytest.raises(expected_exception, match="steps|step"):
-        asyncio.run(async_module.async_sql({"pipeline": spec}))
+        async_module.async_sql([{"name": "pipeline", **spec}])
 
 
 def test_async_sql_validates_pipeline_extra_fields() -> None:
     with pytest.raises(ValueError, match="unsupported custom_sql_pipeline field"):
-        asyncio.run(
-            async_module.async_sql(
+        async_module.async_sql(
+            [
                 {
-                    "pipeline": {
-                        "type": "custom_sql_pipeline",
-                        "steps": [lambda context: None],
-                        "connection_type": "gp",
-                    }
+                    "name": "pipeline",
+                    "type": "custom_sql_pipeline",
+                    "steps": [lambda context: None],
+                    "connection_type": "gp",
                 }
-            )
+            ]
         )

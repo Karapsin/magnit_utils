@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from queue import Queue
+from threading import Thread
 from typing import Any
 
 from .dml.io.execute_read import execute_read
@@ -45,15 +47,34 @@ class _PipelineContext:
         return self.results[-1]
 
 
-async def async_sql(
-    tasks: Mapping[str, Mapping[str, Any]],
+def async_sql(
+    tasks: Sequence[Mapping[str, Any]],
     *,
     concurrency: int = 5,
     fail_fast: bool = True,
     soft_concurrency_cap: int | None = None,
     hard_concurrency_cap: int = _DEFAULT_HARD_CONCURRENCY_CAP,
 ) -> dict[str, Any]:
-    """Run independent SQL tasks concurrently using the existing sync APIs."""
+    """Run independent SQL tasks concurrently and return a result dictionary."""
+    return _run_coroutine_sync(
+        lambda: _async_sql_impl(
+            tasks,
+            concurrency=concurrency,
+            fail_fast=fail_fast,
+            soft_concurrency_cap=soft_concurrency_cap,
+            hard_concurrency_cap=hard_concurrency_cap,
+        )
+    )
+
+
+async def _async_sql_impl(
+    tasks: Sequence[Mapping[str, Any]],
+    *,
+    concurrency: int = 5,
+    fail_fast: bool = True,
+    soft_concurrency_cap: int | None = None,
+    hard_concurrency_cap: int = _DEFAULT_HARD_CONCURRENCY_CAP,
+) -> dict[str, Any]:
     task_defs = _validate_tasks(tasks)
     _validate_concurrency(concurrency)
     _validate_optional_soft_concurrency_cap(soft_concurrency_cap)
@@ -129,6 +150,45 @@ async def async_sql(
         }
     finally:
         _CONCURRENCY_STATE.reset(reset_token)
+
+
+def _run_coroutine_sync(
+    coroutine_factory: Callable[[], Coroutine[Any, Any, dict[str, Any]]],
+) -> dict[str, Any]:
+    if _is_event_loop_running():
+        return _run_coroutine_sync_in_thread(coroutine_factory)
+    return asyncio.run(coroutine_factory())
+
+
+def _run_coroutine_sync_in_thread(
+    coroutine_factory: Callable[[], Coroutine[Any, Any, dict[str, Any]]],
+) -> dict[str, Any]:
+    queue: Queue[tuple[bool, dict[str, Any] | BaseException, Any | None]] = Queue(
+        maxsize=1
+    )
+
+    def run() -> None:
+        try:
+            queue.put((True, asyncio.run(coroutine_factory()), None))
+        except BaseException as exc:
+            queue.put((False, exc, exc.__traceback__))
+
+    thread = Thread(target=run, daemon=True)
+    thread.start()
+    ok, value, traceback = queue.get()
+    thread.join()
+
+    if ok:
+        return value  # type: ignore[return-value]
+    raise value.with_traceback(traceback)  # type: ignore[union-attr]
+
+
+def _is_event_loop_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def _build_concurrency_state(
@@ -212,36 +272,54 @@ def _is_async_callable(func: Any) -> bool:
 
 
 def _validate_tasks(
-    tasks: Mapping[str, Mapping[str, Any]],
+    tasks: Sequence[Mapping[str, Any]],
 ) -> list[tuple[str, str, dict[str, Any]]]:
-    if not isinstance(tasks, Mapping):
-        raise TypeError("tasks must be a non-empty mapping.")
+    if isinstance(tasks, Sequence) and not isinstance(
+        tasks,
+        (str, bytes, bytearray),
+    ):
+        return _validate_task_sequence(tasks)
+    raise TypeError("tasks must be a non-empty sequence of task mappings.")
+
+
+def _validate_task_sequence(
+    tasks: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, str, dict[str, Any]]]:
     if not tasks:
-        raise ValueError("tasks must be a non-empty mapping.")
+        raise ValueError("tasks must be a non-empty sequence.")
 
     task_defs: list[tuple[str, str, dict[str, Any]]] = []
-    for name, spec in tasks.items():
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("Every task name must be a non-empty string.")
+    for index, spec in enumerate(tasks):
         if not isinstance(spec, Mapping):
-            raise TypeError(f"Task {name!r} must be a mapping.")
-
-        kwargs = dict(spec)
-        task_type = kwargs.pop("type", None)
-        if task_type is None:
-            raise ValueError(f"Task {name!r} must define a type.")
-        if not isinstance(task_type, str) or task_type not in _SUPPORTED_TASK_TYPES:
-            supported = ", ".join(sorted(_SUPPORTED_TASK_TYPES))
+            raise TypeError(f"Task at index {index} must be a mapping.")
+        spec_dict = dict(spec)
+        task_name = spec_dict.pop("name", f"task_{index}")
+        if not isinstance(task_name, str) or not task_name.strip():
             raise ValueError(
-                f"Task {name!r} has unsupported type {task_type!r}. "
-                f"Expected one of: {supported}."
+                f"Task at index {index} has invalid name; expected a non-empty string."
             )
-        if task_type == _PIPELINE_TASK_TYPE:
-            kwargs = _validate_pipeline_task(name, kwargs)
-
-        task_defs.append((name, task_type, kwargs))
+        task_defs.append(_validate_task_spec(task_name, spec_dict))
 
     return task_defs
+
+
+def _validate_task_spec(
+    name: str,
+    spec: Mapping[str, Any],
+) -> tuple[str, str, dict[str, Any]]:
+    kwargs = dict(spec)
+    task_type = kwargs.pop("type", None)
+    if task_type is None:
+        raise ValueError(f"Task {name!r} must define a type.")
+    if not isinstance(task_type, str) or task_type not in _SUPPORTED_TASK_TYPES:
+        supported = ", ".join(sorted(_SUPPORTED_TASK_TYPES))
+        raise ValueError(
+            f"Task {name!r} has unsupported type {task_type!r}. "
+            f"Expected one of: {supported}."
+        )
+    if task_type == _PIPELINE_TASK_TYPE:
+        kwargs = _validate_pipeline_task(name, kwargs)
+    return name, task_type, kwargs
 
 
 def _validate_pipeline_task(name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
