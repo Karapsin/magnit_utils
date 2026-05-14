@@ -10,6 +10,8 @@ from queue import Queue
 from threading import Thread
 from typing import Any
 
+from tqdm import tqdm
+
 from .dml.io.execute_read import execute_read
 from .dml.io.execute_sql import execute_sql
 from .dml.io.read_sql import read_sql
@@ -54,6 +56,7 @@ def async_sql(
     fail_fast: bool = True,
     soft_concurrency_cap: int | None = None,
     hard_concurrency_cap: int = _DEFAULT_HARD_CONCURRENCY_CAP,
+    progress: bool = True,
 ) -> dict[str, Any]:
     """Run independent SQL tasks concurrently and return a result dictionary."""
     return _run_coroutine_sync(
@@ -63,6 +66,7 @@ def async_sql(
             fail_fast=fail_fast,
             soft_concurrency_cap=soft_concurrency_cap,
             hard_concurrency_cap=hard_concurrency_cap,
+            progress=progress,
         )
     )
 
@@ -74,11 +78,13 @@ async def _async_sql_impl(
     fail_fast: bool = True,
     soft_concurrency_cap: int | None = None,
     hard_concurrency_cap: int = _DEFAULT_HARD_CONCURRENCY_CAP,
+    progress: bool = True,
 ) -> dict[str, Any]:
     task_defs = _validate_tasks(tasks)
     _validate_concurrency(concurrency)
     _validate_optional_soft_concurrency_cap(soft_concurrency_cap)
     _validate_hard_concurrency_cap(hard_concurrency_cap)
+    _validate_progress(progress)
     state = _build_concurrency_state(
         concurrency=concurrency,
         soft_concurrency_cap=soft_concurrency_cap,
@@ -116,13 +122,19 @@ async def _async_sql_impl(
             asyncio.create_task(run_indexed(index, name, task_type, kwargs))
             for index, (name, task_type, kwargs) in enumerate(task_defs)
         ]
+        progress_bar = _make_progress_bar(
+            total=len(async_tasks),
+            progress=progress,
+        )
+        for task in async_tasks:
+            task.add_done_callback(lambda _task: progress_bar.update(1))
 
         if fail_fast:
             results_by_index: dict[int, Any] = {}
             try:
                 for finished in asyncio.as_completed(async_tasks):
                     index, result = await finished
-                    results_by_index[index] = result
+                    results_by_index[index] = _normalize_task_result(result)
             except BaseException:
                 for task in async_tasks:
                     if not task.done():
@@ -139,16 +151,18 @@ async def _async_sql_impl(
         results_by_index: dict[int, Any] = {}
         for default_index, item in enumerate(indexed_results):
             if isinstance(item, BaseException):
-                results_by_index[default_index] = item
+                results_by_index[default_index] = str(item)
             else:
                 index, result = item
-                results_by_index[index] = result
+                results_by_index[index] = _normalize_task_result(result)
 
         return {
             name: results_by_index[index]
             for index, (name, _task_type, _kwargs) in enumerate(task_defs)
         }
     finally:
+        if "progress_bar" in locals():
+            progress_bar.close()
         _CONCURRENCY_STATE.reset(reset_token)
 
 
@@ -189,6 +203,21 @@ def _is_event_loop_running() -> bool:
     except RuntimeError:
         return False
     return True
+
+
+def _make_progress_bar(*, total: int, progress: bool) -> Any:
+    return tqdm(
+        total=total,
+        desc="async_sql tasks",
+        unit="task",
+        disable=not progress,
+    )
+
+
+def _normalize_task_result(result: Any) -> Any:
+    if result is None:
+        return "success"
+    return result
 
 
 def _build_concurrency_state(
@@ -376,6 +405,11 @@ def _validate_hard_concurrency_cap(hard_concurrency_cap: int) -> None:
         or hard_concurrency_cap < 1
     ):
         raise ValueError("hard_concurrency_cap must be an integer >= 1.")
+
+
+def _validate_progress(progress: bool) -> None:
+    if not isinstance(progress, bool):
+        raise ValueError("progress must be a boolean.")
 
 
 def _run_sync_task(task_type: str, kwargs: dict[str, Any]) -> Any:

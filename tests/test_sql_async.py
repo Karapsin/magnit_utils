@@ -30,7 +30,6 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
 ) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
     read_result = pd.DataFrame({"value": [1]})
-    execute_result = object()
     execute_read_result = pd.DataFrame({"value": [2]})
     load_result = 3
     transfer_result = 4
@@ -44,7 +43,7 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
         return fake_operation
 
     monkeypatch.setattr(async_module, "read_sql", record("read", read_result))
-    monkeypatch.setattr(async_module, "execute_sql", record("execute", execute_result))
+    monkeypatch.setattr(async_module, "execute_sql", record("execute", None))
     monkeypatch.setattr(
         async_module,
         "execute_read",
@@ -107,7 +106,7 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
         "copy_table",
     ]
     pd.testing.assert_frame_equal(result["read_users"], read_result)
-    assert result["refresh_table"] is execute_result
+    assert result["refresh_table"] == "success"
     pd.testing.assert_frame_equal(result["prepare_and_read"], execute_read_result)
     assert result["load_batch"] == load_result
     assert result["copy_table"] == transfer_result
@@ -192,8 +191,8 @@ def test_async_sql_uses_generated_names_for_unnamed_task_sequence(
 def test_async_sql_runs_from_inside_existing_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_execute_sql(**kwargs: Any) -> str:
-        return kwargs["query"]
+    def fake_execute_sql(**kwargs: Any) -> None:
+        return None
 
     monkeypatch.setattr(async_module, "execute_sql", fake_execute_sql)
 
@@ -209,9 +208,61 @@ def test_async_sql_runs_from_inside_existing_event_loop(
             concurrency=1,
         )
 
-    assert asyncio.run(call_sync_api()) == {
-        "task_0": "insert into target select 1"
+    assert asyncio.run(call_sync_api()) == {"task_0": "success"}
+
+
+def test_async_sql_updates_progress_bar(monkeypatch: pytest.MonkeyPatch) -> None:
+    progress_bars: list[Any] = []
+
+    class FakeTqdm:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.updates: list[int] = []
+            self.closed = False
+            progress_bars.append(self)
+
+        def update(self, value: int) -> None:
+            self.updates.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_execute_sql(**kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(async_module, "tqdm", FakeTqdm)
+    monkeypatch.setattr(async_module, "execute_sql", fake_execute_sql)
+
+    result = async_module.async_sql(
+        [
+            {
+                "type": "execute",
+                "connection_type": "gp",
+                "query": "insert into target select 1",
+            },
+            {
+                "type": "execute",
+                "connection_type": "gp",
+                "query": "insert into target select 2",
+            },
+        ],
+        concurrency=1,
+    )
+
+    assert result == {
+        "task_0": "success",
+        "task_1": "success",
     }
+    assert len(progress_bars) == 1
+    progress_bar = progress_bars[0]
+    assert progress_bar.kwargs == {
+        "total": 2,
+        "desc": "async_sql tasks",
+        "unit": "task",
+        "disable": False,
+    }
+    assert progress_bar.updates == [1, 1]
+    assert progress_bar.closed
 
 
 def test_async_sql_concurrency_limits_active_tasks(
@@ -471,7 +522,7 @@ def test_async_sql_fail_fast_false_returns_pipeline_exception() -> None:
         fail_fast=False,
     )
 
-    assert result["pipeline"] is error
+    assert result["pipeline"] == str(error)
 
 
 def test_async_sql_fail_fast_raises_first_exception(
@@ -515,7 +566,11 @@ def test_async_sql_fail_fast_false_returns_exceptions(
             raise error
         return kwargs["query"]
 
+    def fake_execute_sql(**kwargs: Any) -> None:
+        return None
+
     monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
+    monkeypatch.setattr(async_module, "execute_sql", fake_execute_sql)
 
     result = async_module.async_sql(
         named_tasks(
@@ -530,13 +585,19 @@ def test_async_sql_fail_fast_false_returns_exceptions(
                     "connection_type": "gp",
                     "query": "select broken",
                 },
+                "write_ok": {
+                    "type": "execute",
+                    "connection_type": "gp",
+                    "query": "truncate table sandbox.target",
+                },
             }
         ),
         fail_fast=False,
     )
 
     assert result["ok"] == "select ok"
-    assert result["broken"] is error
+    assert result["broken"] == str(error)
+    assert result["write_ok"] == "success"
 
 
 @pytest.mark.parametrize(
@@ -609,6 +670,20 @@ def test_async_sql_validates_hard_concurrency_cap(
             tasks,
             hard_concurrency_cap=hard_concurrency_cap,
         )
+
+
+@pytest.mark.parametrize("progress", [None, 0, 1, "yes"])
+def test_async_sql_validates_progress(progress: Any) -> None:
+    tasks = [
+        {
+            "type": "read",
+            "connection_type": "gp",
+            "query": "select 1",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="progress"):
+        async_module.async_sql(tasks, progress=progress)
 
 
 @pytest.mark.parametrize(

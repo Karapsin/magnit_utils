@@ -63,6 +63,26 @@ def test_map_source_schema_to_target_preserves_common_types() -> None:
     }
 
 
+def test_map_source_schema_to_target_preserves_binary_types() -> None:
+    source_schema = [
+        schema_module.SourceColumn("cheque_pk", "bytea"),
+        schema_module.SourceColumn("raw_payload", "varbinary"),
+    ]
+
+    assert schema_module.map_source_schema_to_target(source_schema, "gp") == {
+        "cheque_pk": "BYTEA",
+        "raw_payload": "BYTEA",
+    }
+    assert schema_module.map_source_schema_to_target(source_schema, "trino") == {
+        "cheque_pk": "VARBINARY",
+        "raw_payload": "VARBINARY",
+    }
+    assert schema_module.map_source_schema_to_target(source_schema, "ch") == {
+        "cheque_pk": "Nullable(String)",
+        "raw_payload": "Nullable(String)",
+    }
+
+
 def test_map_source_schema_to_target_falls_back_for_invalid_decimal_bounds() -> None:
     source_schema = [
         schema_module.SourceColumn("quantity", "numeric(65535, 0)"),

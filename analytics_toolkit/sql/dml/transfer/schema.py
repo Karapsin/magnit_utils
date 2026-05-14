@@ -206,6 +206,8 @@ def _unwrap_type(value: str, wrapper: str) -> str:
 def _classify_source_type(source_type: str) -> str:
     if not source_type:
         return "string"
+    if source_type in {"binary", "bytea", "varbinary"}:
+        return "binary"
     if source_type in {"boolean", "bool"}:
         return "boolean"
     if source_type in {"date", "date32"}:
@@ -250,6 +252,8 @@ def _map_to_gp_type(
     precision: int | None,
     scale: int | None,
 ) -> str:
+    if kind == "binary":
+        return "BYTEA"
     if kind == "boolean":
         return "BOOLEAN"
     if kind == "integer":
@@ -289,6 +293,8 @@ def _map_to_trino_type(
     precision: int | None,
     scale: int | None,
 ) -> str:
+    if kind == "binary":
+        return "VARBINARY"
     if kind == "boolean":
         return "BOOLEAN"
     if kind == "integer":
@@ -328,6 +334,8 @@ def _map_to_ch_base_type(
     precision: int | None,
     scale: int | None,
 ) -> str:
+    if kind == "binary":
+        return "String"
     if kind == "boolean":
         return "Bool"
     if kind == "integer":

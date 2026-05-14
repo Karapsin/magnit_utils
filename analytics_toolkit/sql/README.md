@@ -20,6 +20,7 @@ sql.async_sql(
     fail_fast=True,
     soft_concurrency_cap=None,
     hard_concurrency_cap=10,
+    progress=True,
 )
 sql.gp_vacuum(...)
 sql.create_sql_table(...)
@@ -70,8 +71,11 @@ unnamed tasks are keyed as `task_0`, `task_1`, and so on. It uses
 operations; it does not parallelize an individual SQL statement internally.
 Result keys follow the input task order. With `fail_fast=True`, the first raised
 task exception is raised and pending tasks are cancelled; already-running sync
-work can continue until that function exits. With `fail_fast=False`, exceptions
-are returned under their task names.
+work can continue until that function exits. Successful task results are
+preserved, except `None` results are reported as `"success"`. With
+`fail_fast=False`, failed tasks are reported under their task names as the error
+text. A `tqdm` progress bar is shown by default; pass `progress=False` to
+disable it.
 
 `soft_concurrency_cap` limits actual sync worker execution. When omitted, it
 defaults to `concurrency`. `hard_concurrency_cap` defaults to `10` and rejects
@@ -118,9 +122,10 @@ tasks = [
     },
 ]
 
-result = sql.async_sql(tasks, concurrency=3)
+result = sql.async_sql(tasks, concurrency=3, progress=True)
 
 users_df = result["users"]
+refresh_status = result["refresh_summary"]  # "success"
 loaded_rows = result["load_scores"]
 transferred_rows = result["copy_events"]
 ```
@@ -280,7 +285,9 @@ omitted, the table is created on `source_db`. Cross-backend inserts delegate to
 `transfer_table` with `replace_target_table=False` after the target is created.
 Decimal precision and scale from source metadata are only preserved when valid
 for the target backend; unbounded or out-of-range numerics fall back to the
-backend's safe default decimal type.
+backend's safe default decimal type. Binary source columns are preserved as
+`BYTEA` on Greenplum targets and `VARBINARY` on Trino targets; ClickHouse uses
+`String` for binary payloads.
 
 For ClickHouse targets, `load_df`, `transfer_table`, and
 `create_table_from_sql` create a local `<target>_shard` table first and then

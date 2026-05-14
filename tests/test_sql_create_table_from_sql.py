@@ -181,6 +181,33 @@ def test_schema_only_creation_falls_back_for_gp_unbounded_numeric(
     )
 
 
+def test_schema_only_creation_preserves_gp_bytea_columns(monkeypatch) -> None:
+    connection = FakeDbapiConnection(
+        description=[
+            ("cheque_pk", 17, None, None, None, None),
+            ("quantity", 1700, None, None, 12, 3),
+        ]
+    )
+    monkeypatch.setattr(
+        create_module,
+        "get_sql_connection",
+        lambda connection_key: connection,
+    )
+
+    create_module.create_table_from_sql(
+        "gp",
+        "sandbox.target_table",
+        "select cheque_pk, quantity from source_table;",
+    )
+
+    assert any(
+        sql.startswith("CREATE TABLE sandbox.target_table")
+        and '"cheque_pk" BYTEA' in sql
+        and '"quantity" NUMERIC(12, 3)' in sql
+        for sql in connection.executed
+    )
+
+
 def test_cross_backend_creation_maps_types_to_clickhouse_and_creates_pair(
     monkeypatch,
 ) -> None:
