@@ -5,9 +5,16 @@ from typing import Any
 import pandas as pd
 import sqlparse
 
-from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
+from ...connection.errors import (
+    InvalidSqlInputError,
+    SqlOperationContext,
+    UnsupportedConnectionTypeError,
+    annotate_sql_exception,
+    sql_preview,
+)
 from ...connection.config import get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
+from ...labels import apply_query_label
 from ..transfer.runtime.retry import rollback_quietly, run_with_retry
 from analytics_toolkit.general import time_print
 
@@ -59,6 +66,7 @@ def read_sql(
     print_queries: bool = True,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
+    query_label: str | None = None,
 ) -> pd.DataFrame:
     config = get_connection_config(connection_type)
     connection_key = config.connection_key
@@ -75,7 +83,7 @@ def read_sql(
     statements = [statement.strip() for statement in sqlparse.split(sql) if statement.strip()]
     if len(statements) != 1:
         raise InvalidSqlInputError("read_sql expects exactly one SQL statement.")
-    sql = statements[0].rstrip(";").rstrip()
+    sql = apply_query_label(statements[0].rstrip(";").rstrip(), query_label)
 
     def operation(attempt: int) -> pd.DataFrame:
         connection = get_sql_connection(connection_key)
@@ -89,7 +97,18 @@ def read_sql(
             raise UnsupportedConnectionTypeError(
                 "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
             )
-        except Exception:
+        except Exception as exc:
+            annotate_sql_exception(
+                exc,
+                SqlOperationContext(
+                    operation="read_sql",
+                    alias=connection_key,
+                    backend=backend,
+                    phase="read",
+                    retry_attempt=attempt,
+                    sql_preview=sql_preview(sql),
+                ),
+            )
             if backend == "gp":
                 rollback_quietly(connection)
             raise

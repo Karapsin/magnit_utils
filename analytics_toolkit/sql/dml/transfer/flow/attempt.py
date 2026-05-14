@@ -95,6 +95,7 @@ def load_stage_batches(
         options.batch_size,
         retry_cnt=read_retry_cnt,
         timeout_increment=options.timeout_increment,
+        query_label=options.query_label,
     ):
         if batch.empty:
             continue
@@ -117,6 +118,7 @@ def load_stage_batches(
             timeout_increment=options.timeout_increment,
             target_column_types=stage_state.stage_column_types,
             trino_insert_chunk_size=options.trino_insert_chunk_size,
+            query_label=options.query_label,
         )
         total_rows += inserted_rows
         time_print(

@@ -7,8 +7,7 @@ from typing import Any
 import pandas as pd
 from sqlglot import exp, parse_one
 
-from ...connection.config import resolve_connection_backend
-from ...connection.errors import UnsupportedConnectionTypeError
+from ...identifiers import sqlglot_dialect as _registry_sqlglot_dialect
 from analytics_toolkit.general import time_print
 from ...ddl.create_sql_table import create_sql_table
 from ..table.table_ops import table_exists
@@ -25,6 +24,7 @@ def create_stage_table(
     column_types: Mapping[str, str] | None = None,
     gp_distributed_by_key: list[str] | None = None,
     connection_key: str | None = None,
+    query_label: str | None = None,
 ) -> str:
     for attempt in range(1, STAGE_TABLE_NAME_MAX_ATTEMPTS + 1):
         stage_table = build_stage_table_name(connection_type, target_table)
@@ -40,6 +40,9 @@ def create_stage_table(
             )
             continue
 
+        create_kwargs: dict[str, Any] = {}
+        if query_label is not None:
+            create_kwargs["query_label"] = query_label
         create_sql_table(
             connection_type,
             connection,
@@ -47,6 +50,7 @@ def create_stage_table(
             batch,
             column_types=column_types,
             gp_distributed_by_key=gp_distributed_by_key,
+            **create_kwargs,
         )
         return stage_table
 
@@ -74,13 +78,4 @@ def build_stage_table_name(connection_type: str, table_name: str) -> str:
 
 
 def sqlglot_dialect(connection_type: str) -> str:
-    backend = resolve_connection_backend(connection_type)
-    if backend == "gp":
-        return "postgres"
-    if backend == "trino":
-        return "trino"
-    if backend == "ch":
-        return "clickhouse"
-    raise UnsupportedConnectionTypeError(
-        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
-    )
+    return _registry_sqlglot_dialect(connection_type)

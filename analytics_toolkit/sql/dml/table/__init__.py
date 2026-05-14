@@ -5,8 +5,15 @@ from .ch_full_table_move import ch_full_table_move
 from .create_table_from_sql import create_table_from_sql
 from .table_ops import (
     analyze_table,
+    build_analyze_table_sql,
+    build_clear_table_sqls,
+    build_count_table_rows_sql,
+    build_drop_ch_distributed_table_pair_sqls,
+    build_drop_table_sql,
     clear_target_table,
     build_insert_from_query_sql,
+    build_insert_from_table_sql,
+    count_table_rows,
     drop_table,
     drop_table_with_retry,
     finalize_stage_table,
@@ -26,10 +33,17 @@ from .table_validation import (
 
 __all__ = [
     "analyze_table",
+    "build_analyze_table_sql",
+    "build_clear_table_sqls",
+    "build_count_table_rows_sql",
+    "build_drop_ch_distributed_table_pair_sqls",
+    "build_drop_table_sql",
     "ch_create_table_as",
     "ch_full_table_move",
     "clear_target_table",
     "build_insert_from_query_sql",
+    "build_insert_from_table_sql",
+    "count_table_rows",
     "create_table_from_sql",
     "drop_table",
     "drop_table_with_retry",

@@ -72,17 +72,20 @@ def finalize_loaded_stage(
         sample_batch=stage_state.first_non_empty_batch,
         target_column_types=target_column_types,
         insert_column_types=stage_state.insert_column_types,
+        write_mode=options.write_mode,
         gp_distributed_by_key=options.gp_distributed_by_key,
         ch_partition_by=options.ch_partition_by,
         ch_order_by=options.ch_order_by,
         ch_engine=options.ch_engine,
         ch_cluster=options.ch_cluster,
         ch_sharding_key=options.ch_sharding_key,
+        query_label=options.query_label,
     )
     analyze_table(
         connection_type=options.to_db_backend,
         connection=connection_refs.target["connection"],
         table_name=options.target_table,
+        query_label=options.query_label,
     )
 
 
@@ -99,12 +102,14 @@ def finalize_empty_transfer(
                 connection_refs.target["connection"],
                 options.target_table,
                 ch_cluster=options.ch_cluster,
+                query_label=options.query_label,
             )
             return
         clear_target_table(
             options.to_db_backend,
             connection_refs.target["connection"],
             options.target_table,
+            query_label=options.query_label,
         )
         return
 
@@ -131,4 +136,5 @@ def cleanup_stage(
         timeout_increment=options.timeout_increment,
         rollback_fn=rollback_quietly,
         replace_connection_fn=replace_connection,
+        query_label=options.query_label,
     )

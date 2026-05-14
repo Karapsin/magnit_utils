@@ -9,6 +9,7 @@ class LoadOptions:
     connection_backend: str
     destination_table: str
     append: bool = False
+    write_mode: str = "replace"
     gp_distributed_by_key: list[str] | None = None
     key_columns: list[str] | None = None
     trino_insert_chunk_size: int | None = None
@@ -17,6 +18,7 @@ class LoadOptions:
     ch_engine: str = "ReplicatedMergeTree"
     ch_cluster: str = "{cluster}"
     ch_sharding_key: str = "rand()"
+    query_label: str | None = None
 
 
 @dataclass

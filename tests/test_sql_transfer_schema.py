@@ -63,6 +63,22 @@ def test_map_source_schema_to_target_preserves_common_types() -> None:
     }
 
 
+def test_map_source_schema_to_target_falls_back_for_invalid_decimal_bounds() -> None:
+    source_schema = [
+        schema_module.SourceColumn("quantity", "numeric(65535, 0)"),
+    ]
+
+    assert schema_module.map_source_schema_to_target(source_schema, "gp") == {
+        "quantity": "NUMERIC",
+    }
+    assert schema_module.map_source_schema_to_target(source_schema, "trino") == {
+        "quantity": "DECIMAL(38, 10)",
+    }
+    assert schema_module.map_source_schema_to_target(source_schema, "ch") == {
+        "quantity": "Nullable(Decimal(38, 10))",
+    }
+
+
 def test_existing_target_insert_types_use_target_metadata() -> None:
     client = FakeClickHouseClient()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from numbers import Real
 import re
 from pathlib import Path
 from typing import Sequence
@@ -11,6 +12,9 @@ from openpyxl import load_workbook
 _INVALID_SHEET_CHARS_RE = re.compile(r"[\[\]\*:/\\?]")
 _DEFAULT_SHEET_NAME = "Sheet1"
 _MELTED_VALUE_COLUMN = "__pivot_and_break_value__"
+_PRETTIFY_PERCENT_FORMAT = "0.0%"
+_PRETTIFY_DECIMAL_FORMAT = "0.0"
+_PRETTIFY_WHOLE_FORMAT = "#,##0"
 
 
 def pivot_and_break_table(
@@ -23,6 +27,7 @@ def pivot_and_break_table(
     sheet_by: str | None = None,
     append: bool = False,
     enforce_same_row_order: bool = False,
+    prettify: bool = False,
 ) -> dict[object | None, list[pd.DataFrame]] | dict[object | None, list[list[pd.DataFrame]]]:
     """Pivot a long-format dataframe into Excel tables split by tables and sheets.
 
@@ -73,6 +78,7 @@ def pivot_and_break_table(
         break_by=break_by,
         sheet_by=sheet_by,
         append=append,
+        prettify=prettify,
     )
     return _extract_written_tables(sheet_table_groups)
 
@@ -83,6 +89,7 @@ def break_table(
     break_by: str | None = None,
     sheet_by: str | None = None,
     append: bool = False,
+    prettify: bool = False,
 ) -> dict[object | None, list[pd.DataFrame]] | dict[object | None, list[list[pd.DataFrame]]]:
     """Write grouped dataframe slices as stacked tables across Excel sheets."""
     dataframes = _normalize_dataframe_inputs(df)
@@ -107,6 +114,7 @@ def break_table(
         break_by=break_by,
         sheet_by=sheet_by,
         append=append,
+        prettify=prettify,
     )
     return _extract_written_tables(sheet_table_groups)
 
@@ -451,6 +459,7 @@ def _write_tables(
     break_by: str | None,
     sheet_by: str | None,
     append: bool,
+    prettify: bool,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     existing_sheet_names: set[str] = set()
@@ -488,6 +497,7 @@ def _write_tables(
                 sheet_table_groups=sheet_table_groups,
                 sheet_value=sheet_value,
                 break_by=break_by,
+                prettify=prettify,
             )
 
 
@@ -517,6 +527,7 @@ def _write_table_block(
     break_by: str | None,
     startrow: int,
     startcol: int,
+    prettify: bool,
 ) -> None:
     if break_by is not None:
         title = pd.DataFrame({break_by: [_coerce_excel_scalar(break_value)]})
@@ -530,13 +541,22 @@ def _write_table_block(
         )
         startrow += 1
 
-    _coerce_excel_dataframe(table).to_excel(
+    excel_table = _coerce_excel_dataframe(table)
+    excel_table.to_excel(
         writer,
         sheet_name=sheet_name,
         index=False,
         startrow=startrow,
         startcol=startcol,
     )
+    if prettify:
+        _prettify_table_body(
+            writer=writer,
+            sheet_name=sheet_name,
+            table=excel_table,
+            body_start_row=startrow + 2,
+            start_col=startcol + 1,
+        )
 
 
 def _write_sheet_blocks(
@@ -545,6 +565,7 @@ def _write_sheet_blocks(
     sheet_table_groups: list[dict[object | None, list[tuple[object | None, pd.DataFrame]]]],
     sheet_value: object | None,
     break_by: str | None,
+    prettify: bool,
 ) -> None:
     tables_per_group = [sheet_tables.get(sheet_value, []) for sheet_tables in sheet_table_groups]
     startcols: list[int] = []
@@ -571,10 +592,50 @@ def _write_sheet_blocks(
                 break_by=break_by,
                 startrow=startrow,
                 startcol=startcols[group_index],
+                prettify=prettify,
             )
             row_height = max(row_height, _table_block_height(table=table, break_by=break_by))
 
         startrow += row_height
+
+
+def _prettify_table_body(
+    writer: pd.ExcelWriter,
+    sheet_name: str,
+    table: pd.DataFrame,
+    body_start_row: int,
+    start_col: int,
+) -> None:
+    worksheet = writer.sheets[sheet_name]
+    for row_offset, row_values in enumerate(table.itertuples(index=False, name=None)):
+        numeric_values = [value for value in row_values if _is_prettify_numeric_value(value)]
+        number_format = _prettify_number_format(numeric_values)
+        if number_format is None:
+            continue
+
+        excel_row = body_start_row + row_offset
+        for column_offset, value in enumerate(row_values):
+            if _is_prettify_numeric_value(value):
+                worksheet.cell(
+                    row=excel_row,
+                    column=start_col + column_offset,
+                ).number_format = number_format
+
+
+def _prettify_number_format(values: list[object]) -> str | None:
+    if not values:
+        return None
+    if all(0 <= value <= 1 for value in values):
+        return _PRETTIFY_PERCENT_FORMAT
+    if all(-100 <= value <= 100 for value in values):
+        return _PRETTIFY_DECIMAL_FORMAT
+    return _PRETTIFY_WHOLE_FORMAT
+
+
+def _is_prettify_numeric_value(value: object) -> bool:
+    if isinstance(value, bool) or pd.isna(value):
+        return False
+    return isinstance(value, (Real, Decimal))
 
 
 def _table_group_width(

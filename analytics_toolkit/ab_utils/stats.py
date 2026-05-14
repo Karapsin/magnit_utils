@@ -27,6 +27,28 @@ def _safe_mean(values: pd.Series) -> float:
     return float(values.mean())
 
 
+def _compute_sample_variance(values: pd.Series) -> float:
+    if values.shape[0] < 2:
+        return math.nan
+    variance = float(values.var(ddof=1))
+    if math.isnan(variance):
+        return math.nan
+    return variance
+
+
+def _compute_group_diff_standard_error(
+    baseline_variance: float,
+    baseline_n: int,
+    test_variance: float,
+    test_n: int,
+) -> float:
+    if baseline_n <= 0 or test_n <= 0:
+        return math.nan
+    if math.isnan(baseline_variance) or math.isnan(test_variance):
+        return math.nan
+    return math.sqrt((baseline_variance / baseline_n) + (test_variance / test_n))
+
+
 def _compute_ttest_stat_and_p_value(
     baseline_values: pd.Series,
     test_values: pd.Series,
@@ -51,8 +73,8 @@ def _compute_mde_abs(
     if n0 < 2 or n1 < 2:
         return math.nan
 
-    variance0 = float(baseline_values.var(ddof=1))
-    variance1 = float(test_values.var(ddof=1))
+    variance0 = _compute_sample_variance(baseline_values)
+    variance1 = _compute_sample_variance(test_values)
     if math.isnan(variance0) or math.isnan(variance1):
         return math.nan
 

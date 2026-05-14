@@ -6,6 +6,7 @@ from typing import Any
 import pandas as pd
 
 from ....connection.errors import UnsupportedConnectionTypeError
+from ....labels import apply_query_label
 from analytics_toolkit.general import time_print
 from ..runtime.retry import replace_connection, rollback_quietly, run_with_retry
 
@@ -18,13 +19,15 @@ def iter_source_batches(
     batch_size: int,
     retry_cnt: int,
     timeout_increment: int | float,
+    query_label: str | None = None,
 ) -> Iterator[pd.DataFrame]:
+    labeled_query = apply_query_label(query, query_label)
     if connection_backend in {"gp", "trino"}:
         yield from _iter_dbapi_batches(
             connection_key,
             connection_backend,
             connection_ref,
-            query,
+            labeled_query,
             batch_size,
             retry_cnt=retry_cnt,
             timeout_increment=timeout_increment,
@@ -34,7 +37,7 @@ def iter_source_batches(
         yield from _iter_clickhouse_batches(
             connection_key,
             connection_ref,
-            query,
+            labeled_query,
             batch_size,
             retry_cnt=retry_cnt,
             timeout_increment=timeout_increment,

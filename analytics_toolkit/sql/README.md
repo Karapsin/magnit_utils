@@ -251,6 +251,50 @@ For Trino targets, `load_df` and `transfer_table` also accept
 parameterized multi-row insert statement. If omitted, the package falls back to
 the target Trino connection's `insert_chunk_size`, then to the internal default.
 
+## Opt-In Write Controls
+
+Write-heavy helpers keep their existing defaults. `load_df(append=False)` still
+replaces the target, and `load_df(append=True)` still appends. New callers can
+use `write_mode` for explicit behavior:
+
+- `append`: insert rows into the target.
+- `replace`: recreate or clear the target using the helper's historical replace
+  behavior.
+- `truncate_insert`: clear existing table data and then insert rows when the
+  target exists.
+- `upsert`: reserved and currently rejected for all backends.
+
+`load_df`, `transfer_table`, `create_table_from_sql`, `create_sql_table`, and
+`ch_create_table_as` accept `dry_run=True` or `return_sql=True` to return a
+`SqlPlan` without mutating a database. Plans contain ordered SQL statements,
+aliases/backends, target metadata, and notable options. `load_df`,
+`transfer_table`, and `create_table_from_sql` also accept
+`return_metadata=True`; the returned `SqlOperationResult` includes row counts
+that can be collected without changing the historical default return values.
+
+Use `query_label` to add a safe SQL comment to generated statements and logs:
+
+```python
+plan = sql.load_df(
+    "gp",
+    "sandbox.scores",
+    scores_df,
+    write_mode="truncate_insert",
+    dry_run=True,
+    query_label="daily_score_refresh",
+)
+
+loaded = sql.load_df(
+    "gp",
+    "sandbox.scores",
+    scores_df,
+    return_metadata=True,
+    query_label="daily_score_refresh",
+)
+loaded.rows
+loaded.metadata.final_target_rows
+```
+
 `transfer_table` reads native source query column types before loading data.
 Stage and newly created target tables use the closest matching target backend
 types instead of pandas-inferred batch types. Final stage-to-target inserts use
@@ -264,6 +308,9 @@ query result after creation. Existing targets are preserved by default; pass
 `drop_target_if_exists=True` to drop the target first. When `table_db` is
 omitted, the table is created on `source_db`. Cross-backend inserts delegate to
 `transfer_table` with `replace_target_table=False` after the target is created.
+Decimal precision and scale from source metadata are only preserved when valid
+for the target backend; unbounded or out-of-range numerics fall back to the
+backend's safe default decimal type.
 
 For ClickHouse targets, `load_df`, `transfer_table`, and
 `create_table_from_sql` create a local `<target>_shard` table first and then
@@ -351,6 +398,29 @@ key's `type`.
 
 Trino supports optional `auth_mode`, `http_scheme`, `verify`,
 `use_keychain_certs`, `keychain_cert_names`, and `insert_chunk_size` fields.
+
+Validate connection files from Python or the CLI:
+
+```python
+from analytics_toolkit import sql
+
+for result in sql.validate_connections(["gp", "trino"]):
+    print(result.connection_key, result.valid, result.error)
+```
+
+```bash
+analytics-toolkit sql validate
+analytics-toolkit sql validate gp trino --connect
+analytics-toolkit sql support-matrix
+```
+
+## SQL Support Matrix
+
+| Backend | Parser dialect | Transactions | Analyze | Distributed DDL | Write modes |
+| --- | --- | --- | --- | --- | --- |
+| `gp` | `postgres` | yes | yes | no | `append`, `replace`, `truncate_insert` |
+| `trino` | `trino` | no | yes | no | `append`, `replace`, `truncate_insert` |
+| `ch` | `clickhouse` | no | no | yes | `append`, `replace`, `truncate_insert` |
 
 ## Migration From Env Vars
 

@@ -7,11 +7,21 @@ import pandas as pd
 import sqlparse
 
 from ...connection.config import get_connection_config
-from ...connection.errors import InvalidSqlInputError
+from ...connection.errors import (
+    InvalidSqlInputError,
+    SqlOperationContext,
+    annotate_sql_exception,
+    sql_preview,
+)
 from ...connection.get_sql_connection import get_sql_connection
 from ...ddl.create_sql_table import create_sql_table
+from ...labels import apply_query_label
+from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from ..transfer.schema import inspect_source_query_schema, map_source_schema_to_target
 from .table_ops import (
+    build_drop_ch_distributed_table_pair_sqls,
+    build_drop_table_sql,
+    build_insert_from_query_sql,
     drop_ch_distributed_table_pair,
     drop_table,
     insert_from_query,
@@ -41,7 +51,11 @@ def create_table_from_sql(
     ch_cluster: str = "{cluster}",
     sharding_key: str = "rand()",
     trino_insert_chunk_size: int | None = None,
-) -> int | None:
+    dry_run: bool = False,
+    return_sql: bool = False,
+    return_metadata: bool = False,
+    query_label: str | None = None,
+) -> int | None | SqlPlan | SqlOperationResult:
     target_table = _normalize_table_name(table_name)
     source_sql = _normalize_single_query(sql)
     source_config = get_connection_config(source_db)
@@ -72,6 +86,19 @@ def create_table_from_sql(
     if trino_insert_chunk_size is not None and trino_insert_chunk_size <= 0:
         raise ValueError("trino_insert_chunk_size must be a positive integer.")
 
+    if dry_run or return_sql:
+        return _build_create_table_from_sql_plan(
+            source_key=source_config.connection_key,
+            source_backend=source_config.backend,
+            target_key=target_config.connection_key,
+            target_backend=target_config.backend,
+            target_table=target_table,
+            source_sql=source_sql,
+            insert_data=insert_data,
+            drop_target_if_exists=drop_target_if_exists,
+            query_label=query_label,
+        )
+
     source_connection: Any | None = None
     target_connection: Any | None = None
     inserted_rows: int | None = None
@@ -91,7 +118,7 @@ def create_table_from_sql(
         source_schema = inspect_source_query_schema(
             source_config.backend,
             source_connection,
-            source_sql,
+            apply_query_label(source_sql, query_label),
         )
         source_columns = [column.name for column in source_schema]
         _validate_source_columns(source_columns)
@@ -115,6 +142,7 @@ def create_table_from_sql(
                     target_connection,
                     target_table,
                     ch_cluster=ch_cluster_name,
+                    query_label=query_label,
                 )
             else:
                 time_print(
@@ -125,6 +153,7 @@ def create_table_from_sql(
                     target_config.backend,
                     target_connection,
                     target_table,
+                    query_label=query_label,
                 )
 
         create_sql_table(
@@ -140,9 +169,15 @@ def create_table_from_sql(
             ch_cluster=ch_cluster_name,
             ch_sharding_key=ch_sharding_key,
             ch_distributed_table=target_config.backend == "ch",
+            query_label=query_label,
         )
 
         if not insert_data:
+            if return_metadata:
+                return SqlOperationResult(
+                    rows=None,
+                    metadata=SqlOperationMetadata(),
+                )
             return None
 
         if source_config.backend == target_config.backend:
@@ -152,9 +187,23 @@ def create_table_from_sql(
                 target_table,
                 source_sql,
                 target_column_types,
+                query_label=query_label,
             )
         else:
             delegate_transfer = True
+    except Exception as exc:
+        annotate_sql_exception(
+            exc,
+            SqlOperationContext(
+                operation="create_table_from_sql",
+                alias=target_config.connection_key,
+                backend=target_config.backend,
+                phase="create_or_insert",
+                target_table=target_table,
+                sql_preview=sql_preview(source_sql),
+            ),
+        )
+        raise
     finally:
         _close_connections(
             source_connection=source_connection,
@@ -164,19 +213,33 @@ def create_table_from_sql(
         )
 
     if delegate_transfer:
-        return transfer_table(
-            from_db=source_config.connection_key,
-            to_db=target_config.connection_key,
-            from_sql=source_sql,
-            to_table=target_table,
-            replace_target_table=False,
-            gp_distributed_by_key=gp_distribution,
-            trino_insert_chunk_size=trino_insert_chunk_size,
-            ch_partition_by=ch_partition,
-            ch_order_by=ch_order,
-            ch_engine=ch_engine_name,
-            ch_cluster=ch_cluster_name,
-            sharding_key=ch_sharding_key,
+        transfer_kwargs: dict[str, object] = {
+            "from_db": source_config.connection_key,
+            "to_db": target_config.connection_key,
+            "from_sql": source_sql,
+            "to_table": target_table,
+            "replace_target_table": False,
+            "gp_distributed_by_key": gp_distribution,
+            "trino_insert_chunk_size": trino_insert_chunk_size,
+            "ch_partition_by": ch_partition,
+            "ch_order_by": ch_order,
+            "ch_engine": ch_engine_name,
+            "ch_cluster": ch_cluster_name,
+            "sharding_key": ch_sharding_key,
+        }
+        if query_label is not None:
+            transfer_kwargs["query_label"] = query_label
+        if return_metadata:
+            transfer_kwargs["return_metadata"] = return_metadata
+        return transfer_table(**transfer_kwargs)
+    if return_metadata:
+        return SqlOperationResult(
+            rows=inserted_rows,
+            metadata=SqlOperationMetadata(
+                source_rows=inserted_rows,
+                inserted_rows=inserted_rows,
+                affected_rows=inserted_rows,
+            ),
         )
     return inserted_rows
 
@@ -186,6 +249,86 @@ def _normalize_table_name(table_name: str) -> str:
     if not normalized:
         raise InvalidSqlInputError("table_name must not be empty.")
     return normalized
+
+
+def _build_create_table_from_sql_plan(
+    *,
+    source_key: str,
+    source_backend: str,
+    target_key: str,
+    target_backend: str,
+    target_table: str,
+    source_sql: str,
+    insert_data: bool,
+    drop_target_if_exists: bool,
+    query_label: str | None,
+) -> SqlPlan:
+    plan = SqlPlan(
+        operation="create_table_from_sql",
+        source_alias=source_key,
+        target_alias=target_key,
+        source_backend=source_backend,
+        target_backend=target_backend,
+        target_table=target_table,
+        options={
+            "insert_data": insert_data,
+            "drop_target_if_exists": drop_target_if_exists,
+        },
+    )
+    plan.add(
+        f"SELECT * FROM ({source_sql}) AS source_schema_probe WHERE 1 = 0",
+        alias=source_key,
+        backend=source_backend,
+        phase="inspect_source_schema",
+        query_label=query_label,
+    )
+    if drop_target_if_exists:
+        if target_backend == "ch":
+            plan.extend(
+                build_drop_ch_distributed_table_pair_sqls(
+                    target_table,
+                    query_label=query_label,
+                ),
+                alias=target_key,
+                backend=target_backend,
+                phase="drop_target",
+                target_table=target_table,
+            )
+        else:
+            plan.add(
+                build_drop_table_sql(
+                    target_backend,
+                    target_table,
+                    query_label=query_label,
+                ),
+                alias=target_key,
+                backend=target_backend,
+                phase="drop_target",
+                target_table=target_table,
+            )
+    plan.add(
+        f"CREATE TABLE {target_table} (<source query schema>)",
+        alias=target_key,
+        backend=target_backend,
+        phase="create_target",
+        target_table=target_table,
+        query_label=query_label,
+    )
+    if insert_data:
+        plan.add(
+            build_insert_from_query_sql(
+                target_backend,
+                target_table,
+                source_sql,
+                {},
+                query_label=query_label,
+            ).replace(" ()", "").replace("SELECT  FROM", "SELECT * FROM"),
+            alias=target_key,
+            backend=target_backend,
+            phase="insert_data",
+            target_table=target_table,
+        )
+    return plan
 
 
 def _normalize_single_query(query: str) -> str:

@@ -13,6 +13,7 @@ from analytics_toolkit.ab_utils.metrics import (
     _build_ratio_valid_mask,
     _compute_agg_ratio_diff_standard_error,
     _compute_agg_ratio_group_stats,
+    _compute_agg_ratio_variance,
     _compute_studentized_statistic,
     _compute_ttest_stat_and_p_value,
     _get_numeric_metric_series,
@@ -212,7 +213,7 @@ def test_compute_test_metrics_adds_metric_control_and_metric_test_columns() -> N
 
     result = compute_test_metrics(df, test_vs_test=False)
 
-    assert result.columns.tolist()[:9] == [
+    assert result.columns.tolist()[:11] == [
         "metric_type",
         "group_1",
         "group_2",
@@ -221,8 +222,12 @@ def test_compute_test_metrics_adds_metric_control_and_metric_test_columns() -> N
         "n1",
         "metric_control",
         "metric_test",
+        "variance_control",
+        "variance_test",
         "delta_abs",
     ]
+    assert result.columns[result.columns.get_loc("mde_relative") + 1] == "s.e."
+    assert result.columns[result.columns.get_loc("s.e.") + 1] == "p-value"
 
     orders_row = result[
         (result["group_1"] == "test_a")
@@ -232,6 +237,15 @@ def test_compute_test_metrics_adds_metric_control_and_metric_test_columns() -> N
     assert orders_row["metric_type"] == "mean"
     assert orders_row["metric_control"] == pytest.approx((10 + 12 + 9) / 3)
     assert orders_row["metric_test"] == pytest.approx((13 + 15 + 11 + 14) / 4)
+    control_values = pd.Series([10, 12, 9], dtype=float)
+    test_values = pd.Series([13, 15, 11, 14], dtype=float)
+    expected_control_variance = control_values.var(ddof=1)
+    expected_test_variance = test_values.var(ddof=1)
+    assert orders_row["variance_control"] == pytest.approx(expected_control_variance)
+    assert orders_row["variance_test"] == pytest.approx(expected_test_variance)
+    assert orders_row["s.e."] == pytest.approx(
+        math.sqrt((expected_control_variance / 3) + (expected_test_variance / 4))
+    )
 
 
 def test_compute_test_metrics_uses_raw_relative_fields() -> None:
@@ -273,6 +287,39 @@ def test_ratio_metrics_default_to_agg_level() -> None:
     assert ratio_row["metric_control"] == pytest.approx((5 + 3 + 4 + 2) / (10 + 8 + 0 + 4))
     assert ratio_row["metric_test"] == pytest.approx((7 + 5 + 6 + 8) / (14 + 10 + 12 + 16))
 
+    numerator = _get_numeric_metric_series(df, "clicks")
+    denominator = _get_numeric_metric_series(df, "impressions")
+    valid_mask = _build_ratio_valid_mask(numerator=numerator, denominator=denominator, level="agg")
+    baseline_frame = pd.DataFrame(
+        {
+            "numerator": numerator[(df["group_name"] == "control") & valid_mask],
+            "denominator": denominator[(df["group_name"] == "control") & valid_mask],
+        }
+    )
+    test_frame = pd.DataFrame(
+        {
+            "numerator": numerator[(df["group_name"] == "test_a") & valid_mask],
+            "denominator": denominator[(df["group_name"] == "test_a") & valid_mask],
+        }
+    )
+    baseline_stats = _compute_agg_ratio_group_stats(baseline_frame)
+    test_stats = _compute_agg_ratio_group_stats(test_frame)
+    expected_control_variance = _compute_agg_ratio_variance(
+        baseline_frame,
+        baseline_stats["ratio"],
+    )
+    expected_test_variance = _compute_agg_ratio_variance(test_frame, test_stats["ratio"])
+    assert ratio_row["variance_control"] == pytest.approx(expected_control_variance)
+    assert ratio_row["variance_test"] == pytest.approx(expected_test_variance)
+    assert ratio_row["s.e."] == pytest.approx(
+        _compute_agg_ratio_diff_standard_error(
+            baseline_frame=baseline_frame,
+            baseline_ratio=baseline_stats["ratio"],
+            test_frame=test_frame,
+            test_ratio=test_stats["ratio"],
+        )
+    )
+
 
 def test_compute_test_metrics_parallel_bootstrap_is_reproducible() -> None:
     df = _build_sample_metrics_df()
@@ -293,6 +340,14 @@ def test_compute_test_metrics_parallel_bootstrap_is_reproducible() -> None:
     )
 
     pd.testing.assert_frame_equal(first, second)
+    assert first.columns[first.columns.get_loc("p-value") + 1] == "s.e. bootstrap"
+    assert first.columns[first.columns.get_loc("s.e. bootstrap") + 1] == "bootstrap_adj_p"
+    orders_row = first[
+        (first["group_1"] == "test_a")
+        & (first["group_2"] == "control")
+        & (first["metric_name"] == "orders")
+    ].iloc[0]
+    assert not math.isnan(float(orders_row["s.e. bootstrap"]))
 
 
 def test_compute_test_metrics_accepts_bootstrap_progress() -> None:
@@ -306,6 +361,7 @@ def test_compute_test_metrics_accepts_bootstrap_progress() -> None:
         bootstrap_progress=True,
     )
 
+    assert "s.e. bootstrap" in result.columns
     assert "bootstrap_adj_p" in result.columns
 
 
@@ -352,8 +408,10 @@ def test_compute_test_metrics_adds_cuped_p_value_for_mean_metrics() -> None:
         pre_exp_metrics_df=pre_df,
     )
 
-    assert result.columns[result.columns.get_loc("p-value") + 1] == "p-value CUPED"
+    assert result.columns[result.columns.get_loc("p-value") + 1] == "s.e. CUPED"
+    assert result.columns[result.columns.get_loc("s.e. CUPED") + 1] == "p-value CUPED"
     orders_row = result[result["metric_name"] == "orders"].iloc[0]
+    assert not math.isnan(float(orders_row["s.e. CUPED"]))
     assert not math.isnan(float(orders_row["p-value CUPED"]))
 
 
@@ -392,6 +450,7 @@ def test_compute_test_metrics_adds_cuped_p_value_for_ratio_metrics() -> None:
 
     ratio_row = result[result["metric_name"] == "ctr_user"].iloc[0]
     assert ratio_row["metric_type"] == "ratio"
+    assert not math.isnan(float(ratio_row["s.e. CUPED"]))
     assert not math.isnan(float(ratio_row["p-value CUPED"]))
 
 
@@ -420,6 +479,7 @@ def test_compute_test_metrics_warns_and_sets_nan_when_pre_metric_is_missing() ->
         )
 
     orders_row = result[result["metric_name"] == "orders"].iloc[0]
+    assert math.isnan(float(orders_row["s.e. CUPED"]))
     assert math.isnan(float(orders_row["p-value CUPED"]))
 
 

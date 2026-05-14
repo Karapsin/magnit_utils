@@ -5,8 +5,15 @@ from typing import Any
 import pandas as pd
 
 from ...connection.config import get_connection_config
-from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
+from ...connection.errors import (
+    InvalidSqlInputError,
+    SqlOperationContext,
+    UnsupportedConnectionTypeError,
+    annotate_sql_exception,
+    sql_preview,
+)
 from ...connection.get_sql_connection import get_sql_connection
+from ...labels import apply_query_label
 from ..transfer.runtime.retry import rollback_quietly, run_with_retry
 from analytics_toolkit.general import time_print
 from .execute_sql import (
@@ -28,6 +35,7 @@ def execute_read(
     gp_commit_each_statement: bool = False,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
+    query_label: str | None = None,
 ) -> pd.DataFrame:
     config = get_connection_config(connection_type)
     connection_key = config.connection_key
@@ -44,6 +52,8 @@ def execute_read(
     statements = _split_sql_statements(sql)
     if not statements:
         raise InvalidSqlInputError("Query string must not be empty.")
+    if query_label is not None:
+        statements = [apply_query_label(statement, query_label) for statement in statements]
 
     def operation(attempt: int) -> pd.DataFrame:
         connection = get_sql_connection(connection_key)
@@ -74,7 +84,18 @@ def execute_read(
             raise UnsupportedConnectionTypeError(
                 "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
             )
-        except Exception:
+        except Exception as exc:
+            annotate_sql_exception(
+                exc,
+                SqlOperationContext(
+                    operation="execute_read",
+                    alias=connection_key,
+                    backend=backend,
+                    phase="execute_read",
+                    retry_attempt=attempt,
+                    sql_preview=sql_preview(statements[-1] if statements else sql),
+                ),
+            )
             if backend == "gp":
                 rollback_quietly(connection)
             raise

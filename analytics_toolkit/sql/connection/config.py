@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -55,6 +56,15 @@ class ChConfig:
 
 
 ConnectionConfig = TrinoConfig | GpConfig | ChConfig
+
+
+@dataclass(frozen=True)
+class ConnectionValidationResult:
+    connection_key: str
+    backend: BackendName | None
+    valid: bool
+    connected: bool | None = None
+    error: str | None = None
 
 
 def get_connection_config(connection_key: str) -> ConnectionConfig:
@@ -132,6 +142,54 @@ def get_connection_config(connection_key: str) -> ConnectionConfig:
 def get_connection_backend(connection_key: str) -> BackendName:
     config = get_connection_config(connection_key)
     return config.backend
+
+
+def validate_connections(
+    keys: Sequence[str] | None = None,
+    *,
+    connect: bool = False,
+) -> list[ConnectionValidationResult]:
+    if keys is None:
+        normalized_keys = sorted(load_sql_connections())
+    else:
+        normalized_keys = [normalize_connection_key(key) for key in keys]
+
+    results: list[ConnectionValidationResult] = []
+    for key in normalized_keys:
+        try:
+            config = get_connection_config(key)
+            connected: bool | None = None
+            if connect:
+                connection = _open_validation_connection(config.connection_key)
+                try:
+                    connected = True
+                finally:
+                    connection.close()
+            results.append(
+                ConnectionValidationResult(
+                    connection_key=config.connection_key,
+                    backend=config.backend,
+                    valid=True,
+                    connected=connected,
+                )
+            )
+        except Exception as exc:
+            results.append(
+                ConnectionValidationResult(
+                    connection_key=key,
+                    backend=None,
+                    valid=False,
+                    connected=False if connect else None,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            )
+    return results
+
+
+def _open_validation_connection(connection_key: str) -> Any:
+    from .get_sql_connection import get_sql_connection
+
+    return get_sql_connection(connection_key)
 
 
 def resolve_connection_backend(connection_type_or_key: str) -> BackendName:

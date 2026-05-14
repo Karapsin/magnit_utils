@@ -18,6 +18,7 @@ from ...ddl.create_sql_table import (
 )
 from ...ddl.create_sql_table import quote_identifier
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
+from ...labels import apply_query_label
 from analytics_toolkit.general import time_print
 
 
@@ -44,14 +45,100 @@ def table_exists(
     )
 
 
-def clear_target_table(connection_type: str, connection: Any, table_name: str) -> None:
+def build_clear_table_sqls(
+    connection_type: str,
+    table_name: str,
+    query_label: str | None = None,
+) -> list[str]:
+    backend = resolve_connection_backend(connection_type)
+    if backend == "gp":
+        return [apply_query_label(f"TRUNCATE TABLE {table_name}", query_label)]
+    if backend == "trino":
+        return [apply_query_label(f"DELETE FROM {table_name}", query_label)]
+    if backend == "ch":
+        return [
+            apply_query_label(
+                f"TRUNCATE TABLE IF EXISTS {table_name}",
+                query_label,
+            )
+        ]
+    raise UnsupportedConnectionTypeError(
+        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+    )
+
+
+def build_drop_table_sql(
+    connection_type: str,
+    table_name: str,
+    ch_cluster: str | None = None,
+    query_label: str | None = None,
+) -> str:
+    backend = resolve_connection_backend(connection_type)
+    if backend in {"gp", "trino"}:
+        return apply_query_label(f"DROP TABLE IF EXISTS {table_name}", query_label)
+    if backend == "ch":
+        return apply_query_label(
+            f"DROP TABLE IF EXISTS {table_name}{_ch_cluster_clause(ch_cluster)}",
+            query_label,
+        )
+    raise UnsupportedConnectionTypeError(
+        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+    )
+
+
+def build_drop_ch_distributed_table_pair_sqls(
+    table_name: str,
+    ch_cluster: str = "{cluster}",
+    query_label: str | None = None,
+) -> list[str]:
+    shard_table = build_ch_shard_table_name(table_name)
+    return [
+        build_drop_table_sql("ch", table_name, query_label=query_label),
+        build_drop_table_sql("ch", shard_table, query_label=query_label),
+        build_drop_table_sql(
+            "ch",
+            table_name,
+            ch_cluster=ch_cluster,
+            query_label=query_label,
+        ),
+        build_drop_table_sql(
+            "ch",
+            shard_table,
+            ch_cluster=ch_cluster,
+            query_label=query_label,
+        ),
+    ]
+
+
+def build_analyze_table_sql(
+    connection_type: str,
+    table_name: str,
+    query_label: str | None = None,
+) -> str:
+    backend = resolve_connection_backend(connection_type)
+    if backend == "ch":
+        raise UnsupportedConnectionTypeError("ClickHouse does not support ANALYZE here.")
+    if backend in {"gp", "trino"}:
+        return apply_query_label(f"ANALYZE {table_name}", query_label)
+    raise UnsupportedConnectionTypeError(
+        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+    )
+
+
+def clear_target_table(
+    connection_type: str,
+    connection: Any,
+    table_name: str,
+    query_label: str | None = None,
+) -> None:
     time_print(f"Clearing target table {table_name} on {connection_type}")
     backend = resolve_connection_backend(connection_type)
+    sqls = build_clear_table_sqls(backend, table_name, query_label=query_label)
 
     if backend == "gp":
         cursor = connection.cursor()
         try:
-            cursor.execute(f"TRUNCATE TABLE {table_name}")
+            cursor.execute(sqls[0])
             connection.commit()
             return
         except Exception:
@@ -63,13 +150,13 @@ def clear_target_table(connection_type: str, connection: Any, table_name: str) -
     if backend == "trino":
         cursor = connection.cursor()
         try:
-            cursor.execute(f"DELETE FROM {table_name}")
+            cursor.execute(sqls[0])
             return
         finally:
             cursor.close()
 
     if backend == "ch":
-        _truncate_ch_table(connection, table_name)
+        _truncate_ch_table(connection, table_name, query_label=query_label)
         return
 
     raise UnsupportedConnectionTypeError(
@@ -87,12 +174,14 @@ def finalize_stage_table(
     sample_batch: pd.DataFrame,
     target_column_types: Mapping[str, str] | None = None,
     insert_column_types: Mapping[str, str] | None = None,
+    write_mode: str = "replace",
     gp_distributed_by_key: list[str] | None = None,
     ch_partition_by: list[str] | str | None = None,
     ch_order_by: list[str] | str | None = None,
     ch_engine: str = "ReplicatedMergeTree",
     ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
+    query_label: str | None = None,
 ) -> None:
     time_print(
         f"Finalizing staged transfer from {stage_table} into {target_table} on {connection_type}"
@@ -101,12 +190,21 @@ def finalize_stage_table(
 
     if backend == "ch":
         if replace_target_table:
-            drop_ch_distributed_table_pair(
-                connection,
-                target_table,
-                ch_cluster=ch_cluster,
-            )
-            target_exists = False
+            if write_mode == "truncate_insert" and target_exists:
+                clear_ch_distributed_table_data(
+                    connection,
+                    target_table,
+                    ch_cluster=ch_cluster,
+                    query_label=query_label,
+                )
+            else:
+                drop_ch_distributed_table_pair(
+                    connection,
+                    target_table,
+                    ch_cluster=ch_cluster,
+                    query_label=query_label,
+                )
+                target_exists = False
         if not target_exists:
             create_sql_table(
                 connection_type,
@@ -121,6 +219,7 @@ def finalize_stage_table(
                 ch_cluster=ch_cluster,
                 ch_sharding_key=ch_sharding_key,
                 ch_distributed_table=True,
+                query_label=query_label,
             )
         insert_from_table(
             backend,
@@ -128,6 +227,7 @@ def finalize_stage_table(
             target_table,
             stage_table,
             column_types=insert_column_types,
+            query_label=query_label,
         )
         return
 
@@ -139,9 +239,10 @@ def finalize_stage_table(
             sample_batch,
             column_types=target_column_types,
             gp_distributed_by_key=gp_distributed_by_key,
+            query_label=query_label,
         )
     elif replace_target_table:
-        clear_target_table(backend, connection, target_table)
+        clear_target_table(backend, connection, target_table, query_label=query_label)
 
     insert_from_table(
         backend,
@@ -149,6 +250,7 @@ def finalize_stage_table(
         target_table,
         stage_table,
         column_types=insert_column_types,
+        query_label=query_label,
     )
 
 
@@ -156,13 +258,14 @@ def analyze_table(
     connection_type: str,
     connection: Any,
     table_name: str,
+    query_label: str | None = None,
 ) -> None:
     backend = resolve_connection_backend(connection_type)
     if backend == "ch":
         return
 
     time_print(f"Analyzing target table {table_name} on {connection_type}")
-    sql = f"ANALYZE {table_name}"
+    sql = build_analyze_table_sql(backend, table_name, query_label=query_label)
 
     if backend == "gp":
         cursor = connection.cursor()
@@ -240,13 +343,14 @@ def drop_table_with_retry(
     timeout_increment: int | float,
     rollback_fn: Any,
     replace_connection_fn: Any,
+    query_label: str | None = None,
 ) -> None:
     backend = resolve_connection_backend(connection_backend)
 
     def operation(attempt: int) -> None:
         connection = connection_ref["connection"]
         try:
-            drop_table(backend, connection, table_name)
+            drop_table(backend, connection, table_name, query_label=query_label)
             return None
         except Exception:
             if backend == "gp":
@@ -267,10 +371,16 @@ def drop_table(
     connection: Any,
     table_name: str,
     ch_cluster: str | None = None,
+    query_label: str | None = None,
 ) -> None:
     backend = resolve_connection_backend(connection_type)
+    sql = build_drop_table_sql(
+        backend,
+        table_name,
+        ch_cluster=ch_cluster,
+        query_label=query_label,
+    )
     if backend == "gp":
-        sql = f"DROP TABLE IF EXISTS {table_name}"
         cursor = connection.cursor()
         try:
             cursor.execute(sql)
@@ -283,7 +393,6 @@ def drop_table(
             cursor.close()
 
     if backend == "trino":
-        sql = f"DROP TABLE IF EXISTS {table_name}"
         cursor = connection.cursor()
         try:
             cursor.execute(sql)
@@ -292,7 +401,6 @@ def drop_table(
             cursor.close()
 
     if backend == "ch":
-        sql = f"DROP TABLE IF EXISTS {table_name}{_ch_cluster_clause(ch_cluster)}"
         _execute_ch_command(connection, sql)
         return
 
@@ -305,16 +413,18 @@ def drop_ch_distributed_table_pair(
     connection: Any,
     table_name: str,
     ch_cluster: str = "{cluster}",
+    query_label: str | None = None,
 ) -> None:
     shard_table = build_ch_shard_table_name(table_name)
-    drop_table("ch", connection, table_name)
-    drop_table("ch", connection, shard_table)
-    drop_table("ch", connection, table_name, ch_cluster=ch_cluster)
+    drop_table("ch", connection, table_name, query_label=query_label)
+    drop_table("ch", connection, shard_table, query_label=query_label)
+    drop_table("ch", connection, table_name, ch_cluster=ch_cluster, query_label=query_label)
     drop_table(
         "ch",
         connection,
         shard_table,
         ch_cluster=ch_cluster,
+        query_label=query_label,
     )
 
 
@@ -322,10 +432,16 @@ def clear_ch_distributed_table_data(
     connection: Any,
     table_name: str,
     ch_cluster: str = "{cluster}",
+    query_label: str | None = None,
 ) -> None:
     shard_table = build_ch_shard_table_name(table_name)
-    _truncate_ch_table(connection, shard_table, ch_cluster=ch_cluster)
-    _truncate_ch_table(connection, table_name)
+    _truncate_ch_table(
+        connection,
+        shard_table,
+        ch_cluster=ch_cluster,
+        query_label=query_label,
+    )
+    _truncate_ch_table(connection, table_name, query_label=query_label)
 
 
 def get_trino_table_column_types(
@@ -470,13 +586,17 @@ def insert_from_table(
     target_table: str,
     source_table: str,
     column_types: Mapping[str, str] | None = None,
+    query_label: str | None = None,
 ) -> None:
     backend = resolve_connection_backend(connection_type)
-    sql = _build_insert_from_table_sql(
-        backend,
-        target_table,
-        source_table,
-        column_types,
+    sql = apply_query_label(
+        _build_insert_from_table_sql(
+            backend,
+            target_table,
+            source_table,
+            column_types,
+        ),
+        query_label,
     )
 
     if backend == "gp":
@@ -514,6 +634,7 @@ def insert_from_query(
     target_table: str,
     source_sql: str,
     column_types: Mapping[str, str],
+    query_label: str | None = None,
 ) -> int:
     backend = resolve_connection_backend(connection_type)
     sql = build_insert_from_query_sql(
@@ -521,6 +642,7 @@ def insert_from_query(
         target_table,
         source_sql,
         column_types,
+        query_label=query_label,
     )
 
     if backend == "gp":
@@ -558,15 +680,83 @@ def build_insert_from_query_sql(
     target_table: str,
     source_sql: str,
     column_types: Mapping[str, str],
+    query_label: str | None = None,
 ) -> str:
     backend = resolve_connection_backend(connection_type)
     query_sql = source_sql.strip().removesuffix(";").strip()
-    return _build_typed_insert_select_sql(
-        backend,
-        target_table,
-        f"FROM ({query_sql}) AS source_query",
-        column_types,
+    return apply_query_label(
+        _build_typed_insert_select_sql(
+            backend,
+            target_table,
+            f"FROM ({query_sql}) AS source_query",
+            column_types,
+        ),
+        query_label,
     )
+
+
+def build_insert_from_table_sql(
+    connection_type: str,
+    target_table: str,
+    source_table: str,
+    column_types: Mapping[str, str] | None = None,
+    query_label: str | None = None,
+) -> str:
+    backend = resolve_connection_backend(connection_type)
+    return apply_query_label(
+        _build_insert_from_table_sql(
+            backend,
+            target_table,
+            source_table,
+            column_types,
+        ),
+        query_label,
+    )
+
+
+def count_table_rows(
+    connection_type: str,
+    connection: Any,
+    table_name: str,
+    query_label: str | None = None,
+) -> int:
+    backend = resolve_connection_backend(connection_type)
+    sql = build_count_table_rows_sql(backend, table_name, query_label=query_label)
+
+    if backend in {"gp", "trino"}:
+        cursor = connection.cursor()
+        try:
+            cursor.execute(sql)
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            cursor.close()
+
+    if backend == "ch":
+        result = connection.query(sql)
+        rows = getattr(result, "result_rows", None) or []
+        return int(rows[0][0]) if rows else 0
+
+    raise UnsupportedConnectionTypeError(
+        "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+    )
+
+
+def build_count_table_rows_sql(
+    connection_type: str,
+    table_name: str,
+    query_label: str | None = None,
+) -> str:
+    backend = resolve_connection_backend(connection_type)
+    if backend == "ch":
+        sql = f"SELECT count() FROM {table_name}"
+    elif backend in {"gp", "trino"}:
+        sql = f"SELECT COUNT(*) FROM {table_name}"
+    else:
+        raise UnsupportedConnectionTypeError(
+            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+        )
+    return apply_query_label(sql, query_label)
 
 
 def _build_insert_from_table_sql(
@@ -708,10 +898,14 @@ def _truncate_ch_table(
     connection: Any,
     table_name: str,
     ch_cluster: str | None = None,
+    query_label: str | None = None,
 ) -> None:
     _execute_ch_command(
         connection,
-        f"TRUNCATE TABLE IF EXISTS {table_name}{_ch_cluster_clause(ch_cluster)}",
+        apply_query_label(
+            f"TRUNCATE TABLE IF EXISTS {table_name}{_ch_cluster_clause(ch_cluster)}",
+            query_label,
+        ),
     )
 
 

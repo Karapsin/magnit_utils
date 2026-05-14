@@ -4,7 +4,7 @@ import pandas as pd
 
 from .bootstrap import _apply_multiple_comparisons_adjustment
 from .constants import DEFAULT_ALPHA, DEFAULT_POWER
-from .cuped import _compute_cuped_p_value
+from .cuped import _compute_cuped_statistics
 from .ratio import _normalize_ratio_metrics
 from .rows import _build_comparisons, _build_metric_definitions, _build_metric_row
 from .validation import (
@@ -94,8 +94,9 @@ def compute_test_metrics(
                 mde_alpha=mde_alpha,
                 mde_power=mde_power,
             )
+            row["_comparison_key"] = (test_group, baseline_group)
             if pre_exp_metrics_df is not None:
-                row["p-value CUPED"] = _compute_cuped_p_value(
+                row["p-value CUPED"], row["s.e. CUPED"] = _compute_cuped_statistics(
                     df=df,
                     pre_exp_metrics_df=pre_exp_metrics_df,
                     group_column=group,
@@ -134,15 +135,20 @@ def compute_test_metrics(
         "n1",
         "metric_control",
         "metric_test",
+        "variance_control",
+        "variance_test",
         "delta_abs",
         "delta_relative",
         "mde_abs",
         "mde_relative",
+        "s.e.",
         "p-value",
     ]
     if pre_exp_metrics_df is not None:
+        columns.append("s.e. CUPED")
         columns.append("p-value CUPED")
     if multiple_comparisons_adjustment:
+        columns.append("s.e. bootstrap")
         columns.append("bootstrap_adj_p")
     if include_groups:
         columns = ["metric_type", "group_1", "group_2", *columns]
@@ -150,6 +156,7 @@ def compute_test_metrics(
         columns = ["metric_type", *columns]
 
     for row in rows:
+        row.pop("_comparison_key", None)
         row.pop("_metric_key", None)
         row.pop("_test_stat", None)
 

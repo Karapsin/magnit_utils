@@ -8,8 +8,11 @@ from typing import Any
 import pandas as pd
 from sqlglot import exp, parse_one
 
+from ..capabilities import get_backend_capability
 from ..connection.config import resolve_connection_backend
 from ..connection.errors import UnsupportedConnectionTypeError
+from ..labels import apply_query_label
+from ..plans import SqlPlan
 from analytics_toolkit.general import time_print
 
 
@@ -26,7 +29,10 @@ def create_sql_table(
     ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
     ch_distributed_table: bool = False,
-) -> None:
+    dry_run: bool = False,
+    return_sql: bool = False,
+    query_label: str | None = None,
+) -> SqlPlan | None:
     backend = resolve_connection_backend(connection_type)
     time_print(f"Creating target table {table_name} on {connection_type}")
     create_sqls = build_create_table_sqls(
@@ -41,7 +47,24 @@ def create_sql_table(
         ch_cluster=ch_cluster,
         ch_sharding_key=ch_sharding_key,
         ch_distributed_table=ch_distributed_table,
+        query_label=query_label,
     )
+    plan = SqlPlan(
+        operation="create_table",
+        target_alias=connection_type,
+        target_backend=backend,
+        target_table=table_name,
+    )
+    plan.extend(
+        create_sqls,
+        alias=connection_type,
+        backend=backend,
+        phase="create_table",
+        target_table=table_name,
+    )
+
+    if dry_run or return_sql:
+        return plan
 
     if backend == "gp":
         cursor = connection.cursor()
@@ -89,6 +112,7 @@ def build_create_table_sql(
     ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
     ch_distributed_table: bool = False,
+    query_label: str | None = None,
 ) -> str:
     return ";\n".join(
         build_create_table_sqls(
@@ -103,6 +127,7 @@ def build_create_table_sql(
             ch_cluster=ch_cluster,
             ch_sharding_key=ch_sharding_key,
             ch_distributed_table=ch_distributed_table,
+            query_label=query_label,
         )
     )
 
@@ -119,6 +144,7 @@ def build_create_table_sqls(
     ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
     ch_distributed_table: bool = False,
+    query_label: str | None = None,
 ) -> list[str]:
     backend = resolve_connection_backend(connection_type)
     column_defs = []
@@ -152,24 +178,33 @@ def build_create_table_sqls(
     joined_columns = ", ".join(column_defs)
     if backend == "ch":
         if ch_distributed_table:
-            return build_ch_distributed_create_table_sqls(
-                table_name=table_name,
-                joined_columns=joined_columns,
-                ch_partition_by=ch_partition_by,
-                ch_order_by=ch_order_by,
-                ch_engine=ch_engine,
-                ch_cluster=ch_cluster,
-                ch_sharding_key=ch_sharding_key,
+            return _apply_query_label_to_sqls(
+                build_ch_distributed_create_table_sqls(
+                    table_name=table_name,
+                    joined_columns=joined_columns,
+                    ch_partition_by=ch_partition_by,
+                    ch_order_by=ch_order_by,
+                    ch_engine=ch_engine,
+                    ch_cluster=ch_cluster,
+                    ch_sharding_key=ch_sharding_key,
+                ),
+                query_label,
             )
-        return [
-            f"CREATE TABLE {table_name} ({joined_columns}) "
-            "ENGINE = MergeTree ORDER BY tuple()"
-        ]
+        return _apply_query_label_to_sqls(
+            [
+                f"CREATE TABLE {table_name} ({joined_columns}) "
+                "ENGINE = MergeTree ORDER BY tuple()"
+            ],
+            query_label,
+        )
     if backend == "trino":
-        return [
-            f"CREATE TABLE {table_name} ({joined_columns}) "
-            "WITH (format = 'PARQUET', object_store_layout_enabled = true)"
-        ]
+        return _apply_query_label_to_sqls(
+            [
+                f"CREATE TABLE {table_name} ({joined_columns}) "
+                "WITH (format = 'PARQUET', object_store_layout_enabled = true)"
+            ],
+            query_label,
+        )
     if backend == "gp":
         storage_sql = (
             "WITH (appendoptimized = TRUE, compresstype = zstd, compresslevel = 2)"
@@ -180,10 +215,21 @@ def build_create_table_sqls(
             )
         else:
             distribution_sql = "DISTRIBUTED RANDOMLY"
-        return [
-            f"CREATE TABLE {table_name} ({joined_columns}) {storage_sql} {distribution_sql}"
-        ]
-    return [f"CREATE TABLE {table_name} ({joined_columns})"]
+        return _apply_query_label_to_sqls(
+            [
+                f"CREATE TABLE {table_name} ({joined_columns}) "
+                f"{storage_sql} {distribution_sql}"
+            ],
+            query_label,
+        )
+    return _apply_query_label_to_sqls(
+        [f"CREATE TABLE {table_name} ({joined_columns})"],
+        query_label,
+    )
+
+
+def _apply_query_label_to_sqls(sqls: list[str], query_label: str | None) -> list[str]:
+    return [apply_query_label(sql, query_label) for sql in sqls]
 
 
 def _explicit_column_type(
@@ -273,12 +319,9 @@ def column_list_sql(columns: Sequence[str], connection_type: str) -> str:
 
 def quote_identifier(identifier: str, connection_type: str) -> str:
     backend = resolve_connection_backend(connection_type)
-    if backend == "ch":
-        escaped = identifier.replace("`", "``")
-        return f"`{escaped}`"
-
-    escaped = identifier.replace('"', '""')
-    return f'"{escaped}"'
+    quote_char = get_backend_capability(backend).identifier_quote
+    escaped = identifier.replace(quote_char, quote_char * 2)
+    return f"{quote_char}{escaped}{quote_char}"
 
 
 def _add_table_identifier_suffix(table_name: str, suffix: str, dialect: str) -> str:

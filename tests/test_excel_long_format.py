@@ -598,6 +598,113 @@ def test_break_table_writes_decimal_values_as_numeric_excel_cells(tmp_path: Path
         workbook.close()
 
 
+def test_break_table_prettify_formats_numeric_cells_by_body_row(tmp_path: Path) -> None:
+    df = pd.DataFrame(
+        {
+            "metric": ["conversion", "mixed", "margin", "users", "comment"],
+            "note": ["all_numeric", "has_text", "bounded", "large", "text_only"],
+            "control": [0.125, "n/a", -10, 1000, "n/a"],
+            "test_1": [0.75, 0.4, 100, 50, "missing"],
+        }
+    )
+
+    output = tmp_path / "prettified_raw.xlsx"
+    tables = break_table(
+        df=df,
+        output=output,
+        prettify=True,
+    )
+
+    assert tables[None][0].equals(df)
+
+    workbook = load_workbook(output, read_only=False, data_only=True)
+    try:
+        sheet = workbook["Sheet1"]
+        assert sheet["A2"].number_format == "General"
+        assert sheet["B2"].number_format == "General"
+        assert sheet["C2"].number_format == "0.0%"
+        assert sheet["D2"].number_format == "0.0%"
+
+        assert sheet["C3"].number_format == "General"
+        assert sheet["D3"].number_format == "0.0%"
+
+        assert sheet["C4"].number_format == "0.0"
+        assert sheet["D4"].number_format == "0.0"
+
+        assert sheet["C5"].number_format == "#,##0"
+        assert sheet["D5"].number_format == "#,##0"
+
+        assert sheet["C6"].number_format == "General"
+        assert sheet["D6"].number_format == "General"
+    finally:
+        workbook.close()
+
+
+def test_break_table_does_not_apply_custom_formats_by_default(tmp_path: Path) -> None:
+    df = pd.DataFrame(
+        {
+            "metric": ["conversion", "users"],
+            "control": [0.125, 1000],
+            "test_1": [0.75, 50],
+        }
+    )
+
+    output = tmp_path / "plain_raw.xlsx"
+    break_table(
+        df=df,
+        output=output,
+    )
+
+    workbook = load_workbook(output, read_only=False, data_only=True)
+    try:
+        sheet = workbook["Sheet1"]
+        assert sheet["B2"].number_format == "General"
+        assert sheet["C2"].number_format == "General"
+        assert sheet["B3"].number_format == "General"
+        assert sheet["C3"].number_format == "General"
+    finally:
+        workbook.close()
+
+
+def test_pivot_and_break_table_prettify_formats_pivoted_body_rows(tmp_path: Path) -> None:
+    df = pd.DataFrame(
+        {
+            "metric": ["conversion", "conversion", "margin", "margin", "users", "users"],
+            "ab_group": ["control", "test_1", "control", "test_1", "control", "test_1"],
+            "value": [0.125, 0.75, -10, 100, 1000, 50],
+        }
+    )
+
+    output = tmp_path / "prettified_pivot.xlsx"
+    tables = pivot_and_break_table(
+        df=df,
+        rows="metric",
+        value="value",
+        output=output,
+        columns="ab_group",
+        prettify=True,
+    )
+
+    assert tables[None][0].to_dict(orient="records") == [
+        {"metric": "conversion", "control": 0.125, "test_1": 0.75},
+        {"metric": "margin", "control": -10.0, "test_1": 100.0},
+        {"metric": "users", "control": 1000.0, "test_1": 50.0},
+    ]
+
+    workbook = load_workbook(output, read_only=False, data_only=True)
+    try:
+        sheet = workbook["Sheet1"]
+        assert sheet["A2"].number_format == "General"
+        assert sheet["B2"].number_format == "0.0%"
+        assert sheet["C2"].number_format == "0.0%"
+        assert sheet["B3"].number_format == "0.0"
+        assert sheet["C3"].number_format == "0.0"
+        assert sheet["B4"].number_format == "#,##0"
+        assert sheet["C4"].number_format == "#,##0"
+    finally:
+        workbook.close()
+
+
 def test_pivot_and_break_table_writes_decimal_values_as_numeric_excel_cells(
     tmp_path: Path,
 ) -> None:

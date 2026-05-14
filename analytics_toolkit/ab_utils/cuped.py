@@ -7,7 +7,12 @@ import numpy as np
 import pandas as pd
 
 from .ratio import _build_agg_ratio_linearized_values, _build_ratio_valid_mask
-from .stats import _compute_ttest_stat_and_p_value, _get_numeric_metric_series
+from .stats import (
+    _compute_group_diff_standard_error,
+    _compute_sample_variance,
+    _compute_ttest_stat_and_p_value,
+    _get_numeric_metric_series,
+)
 
 
 def _compute_cuped_p_value(
@@ -19,6 +24,27 @@ def _compute_cuped_p_value(
     test_group: str,
     metric_definition: dict[str, object],
 ) -> float:
+    p_value, _ = _compute_cuped_statistics(
+        df=df,
+        pre_exp_metrics_df=pre_exp_metrics_df,
+        group_column=group_column,
+        user_id_column=user_id_column,
+        baseline_group=baseline_group,
+        test_group=test_group,
+        metric_definition=metric_definition,
+    )
+    return p_value
+
+
+def _compute_cuped_statistics(
+    df: pd.DataFrame,
+    pre_exp_metrics_df: pd.DataFrame,
+    group_column: str,
+    user_id_column: str,
+    baseline_group: str,
+    test_group: str,
+    metric_definition: dict[str, object],
+) -> tuple[float, float]:
     cuped_frame, reason = _build_cuped_frame(
         df=df,
         pre_exp_metrics_df=pre_exp_metrics_df,
@@ -37,10 +63,10 @@ def _compute_cuped_p_value(
             ),
             stacklevel=2,
         )
-        return math.nan
+        return math.nan, math.nan
 
     assert cuped_frame is not None
-    p_value, reason = _compute_cuped_p_value_from_frame(
+    p_value, standard_error, reason = _compute_cuped_statistics_from_frame(
         cuped_frame=cuped_frame,
         group_column=group_column,
         baseline_group=baseline_group,
@@ -54,8 +80,8 @@ def _compute_cuped_p_value(
             ),
             stacklevel=2,
         )
-        return math.nan
-    return p_value
+        return math.nan, math.nan
+    return p_value, standard_error
 
 
 def _build_cuped_frame(
@@ -152,11 +178,26 @@ def _compute_cuped_p_value_from_frame(
     baseline_group: str,
     test_group: str,
 ) -> tuple[float, str | None]:
+    p_value, _, reason = _compute_cuped_statistics_from_frame(
+        cuped_frame=cuped_frame,
+        group_column=group_column,
+        baseline_group=baseline_group,
+        test_group=test_group,
+    )
+    return p_value, reason
+
+
+def _compute_cuped_statistics_from_frame(
+    cuped_frame: pd.DataFrame,
+    group_column: str,
+    baseline_group: str,
+    test_group: str,
+) -> tuple[float, float, str | None]:
     metric_exp = cuped_frame["metric_exp"].astype(float)
     metric_pre = cuped_frame["metric_pre"].astype(float)
     pre_variance = float(metric_pre.var(ddof=1))
     if math.isnan(pre_variance) or pre_variance <= 0:
-        return math.nan, "pre-experiment covariate variance is not positive"
+        return math.nan, math.nan, "pre-experiment covariate variance is not positive"
 
     theta = float(metric_exp.cov(metric_pre) / pre_variance)
     adjusted = metric_exp - theta * (metric_pre - float(metric_pre.mean()))
@@ -167,5 +208,16 @@ def _compute_cuped_p_value_from_frame(
         pd.Series(test_values),
     )
     if math.isnan(p_value):
-        return math.nan, "not enough overlapping observations to run the CUPED t-test"
-    return p_value, None
+        return math.nan, math.nan, "not enough overlapping observations to run the CUPED t-test"
+
+    baseline_series = pd.Series(baseline_values)
+    test_series = pd.Series(test_values)
+    standard_error = _compute_group_diff_standard_error(
+        baseline_variance=_compute_sample_variance(baseline_series),
+        baseline_n=int(baseline_series.shape[0]),
+        test_variance=_compute_sample_variance(test_series),
+        test_n=int(test_series.shape[0]),
+    )
+    if math.isnan(standard_error):
+        return math.nan, math.nan, "not enough overlapping observations to run the CUPED t-test"
+    return p_value, standard_error, None

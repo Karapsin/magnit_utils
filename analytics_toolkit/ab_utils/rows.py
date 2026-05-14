@@ -8,14 +8,16 @@ import pandas as pd
 from .constants import DEFAULT_ALPHA, DEFAULT_POWER
 from .ratio import (
     _build_ratio_valid_mask,
-    _compute_agg_ratio_diff_standard_error,
     _compute_agg_ratio_group_stats,
+    _compute_agg_ratio_variance,
 )
 from .stats import (
     _both_present,
+    _compute_group_diff_standard_error,
     _compute_mde_abs,
     _compute_mde_from_standard_error,
     _compute_normal_p_value,
+    _compute_sample_variance,
     _compute_studentized_statistic,
     _compute_ttest_stat_and_p_value,
     _get_numeric_metric_series,
@@ -109,14 +111,26 @@ def _build_mean_metric_row(
     baseline_mean = _safe_mean(baseline_values)
     test_mean = _safe_mean(test_values)
     delta_abs = test_mean - baseline_mean if _both_present(test_mean, baseline_mean) else math.nan
+    baseline_n = int(baseline_values.shape[0])
+    test_n = int(test_values.shape[0])
+    baseline_variance = _compute_sample_variance(baseline_values)
+    test_variance = _compute_sample_variance(test_values)
+    standard_error = _compute_group_diff_standard_error(
+        baseline_variance=baseline_variance,
+        baseline_n=baseline_n,
+        test_variance=test_variance,
+        test_n=test_n,
+    )
     t_stat, p_value = _compute_ttest_stat_and_p_value(baseline_values, test_values)
 
     row = {
         "metric_name": metric_name,
-        "n0": int(baseline_values.shape[0]),
-        "n1": int(test_values.shape[0]),
+        "n0": baseline_n,
+        "n1": test_n,
         "metric_control": baseline_mean,
         "metric_test": test_mean,
+        "variance_control": baseline_variance,
+        "variance_test": test_variance,
         "delta_abs": delta_abs,
         "delta_relative": _safe_relative(delta_abs, baseline_mean),
         "mde_abs": _compute_mde_abs(
@@ -126,7 +140,9 @@ def _build_mean_metric_row(
             power=mde_power,
         ),
         "mde_relative": math.nan,
+        "s.e.": standard_error,
         "p-value": p_value,
+        "s.e. bootstrap": math.nan,
         "bootstrap_adj_p": math.nan,
         "_metric_key": metric_key,
         "_test_stat": t_stat,
@@ -182,12 +198,11 @@ def _build_ratio_metric_row(
     if _both_present(test_stats["ratio"], baseline_stats["ratio"]):
         delta_abs = test_stats["ratio"] - baseline_stats["ratio"]
 
-    se_diff = _compute_agg_ratio_diff_standard_error(
-        baseline_frame=baseline_frame,
-        baseline_ratio=baseline_stats["ratio"],
-        test_frame=test_frame,
-        test_ratio=test_stats["ratio"],
-    )
+    baseline_variance = _compute_agg_ratio_variance(baseline_frame, baseline_stats["ratio"])
+    test_variance = _compute_agg_ratio_variance(test_frame, test_stats["ratio"])
+    se_diff = math.nan
+    if not math.isnan(baseline_variance) and not math.isnan(test_variance):
+        se_diff = math.sqrt(baseline_variance + test_variance)
     p_value = _compute_normal_p_value(delta_abs=delta_abs, standard_error=se_diff)
     mde_abs = _compute_mde_from_standard_error(
         standard_error=se_diff,
@@ -201,11 +216,15 @@ def _build_ratio_metric_row(
         "n1": int(test_stats["n"]),
         "metric_control": baseline_stats["ratio"],
         "metric_test": test_stats["ratio"],
+        "variance_control": baseline_variance,
+        "variance_test": test_variance,
         "delta_abs": delta_abs,
         "delta_relative": _safe_relative(delta_abs, baseline_stats["ratio"]),
         "mde_abs": mde_abs,
         "mde_relative": _safe_relative(mde_abs, baseline_stats["ratio"]),
+        "s.e.": se_diff,
         "p-value": p_value,
+        "s.e. bootstrap": math.nan,
         "bootstrap_adj_p": math.nan,
         "_metric_key": metric_key,
         "_test_stat": _compute_studentized_statistic(delta_abs, se_diff),

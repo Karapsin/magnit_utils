@@ -15,6 +15,7 @@ class TransferOptions:
     source_sql: str
     target_table: str
     replace_target_table: bool = True
+    write_mode: str = "replace"
     batch_size: int = 100_000
     retry_cnt: int = 5
     timeout_increment: int | float = 5
@@ -28,6 +29,7 @@ class TransferOptions:
     ch_engine: str = "ReplicatedMergeTree"
     ch_cluster: str = "{cluster}"
     ch_sharding_key: str = "rand()"
+    query_label: str | None = None
 
 
 @dataclass

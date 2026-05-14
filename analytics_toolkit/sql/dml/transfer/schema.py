@@ -35,6 +35,10 @@ _GP_OID_TYPES = {
     3802: "jsonb",
 }
 
+_GP_MAX_NUMERIC_PRECISION = 1000
+_TRINO_MAX_DECIMAL_PRECISION = 38
+_CLICKHOUSE_MAX_DECIMAL_PRECISION = 76
+
 
 def inspect_source_query_schema(
     connection_backend: str,
@@ -263,7 +267,13 @@ def _map_to_gp_type(
             return "REAL"
         return "DOUBLE PRECISION"
     if kind == "decimal":
-        return _decimal_type("NUMERIC", precision, scale, fallback="NUMERIC")
+        return _decimal_type(
+            "NUMERIC",
+            precision,
+            scale,
+            fallback="NUMERIC",
+            max_precision=_GP_MAX_NUMERIC_PRECISION,
+        )
     if kind == "date":
         return "DATE"
     if kind == "timestamp":
@@ -296,7 +306,13 @@ def _map_to_trino_type(
             return "REAL"
         return "DOUBLE"
     if kind == "decimal":
-        return _decimal_type("DECIMAL", precision, scale, fallback="DECIMAL(38, 10)")
+        return _decimal_type(
+            "DECIMAL",
+            precision,
+            scale,
+            fallback="DECIMAL(38, 10)",
+            max_precision=_TRINO_MAX_DECIMAL_PRECISION,
+        )
     if kind == "date":
         return "DATE"
     if kind == "timestamp":
@@ -335,7 +351,13 @@ def _map_to_ch_base_type(
             return "Float32"
         return "Float64"
     if kind == "decimal":
-        return _decimal_type("Decimal", precision, scale, fallback="Decimal(38, 10)")
+        return _decimal_type(
+            "Decimal",
+            precision,
+            scale,
+            fallback="Decimal(38, 10)",
+            max_precision=_CLICKHOUSE_MAX_DECIMAL_PRECISION,
+        )
     if kind == "date":
         return "Date"
     if kind == "timestamp":
@@ -348,8 +370,16 @@ def _decimal_type(
     precision: int | None,
     scale: int | None,
     fallback: str,
+    max_precision: int,
 ) -> str:
-    if precision is None or scale is None:
+    if (
+        precision is None
+        or scale is None
+        or precision < 1
+        or precision > max_precision
+        or scale < 0
+        or scale > precision
+    ):
         return fallback
     return f"{name}({precision}, {scale})"
 

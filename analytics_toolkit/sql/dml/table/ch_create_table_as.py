@@ -8,6 +8,8 @@ import sqlparse
 from ...connection.config import get_connection_config
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
 from ...connection.get_sql_connection import get_sql_connection
+from ...labels import apply_query_label
+from ...plans import SqlPlan
 from ...ddl.create_sql_table import (
     _build_ch_order_by_sql,
     _build_ch_partition_by_sql,
@@ -36,7 +38,10 @@ def ch_create_table_as(
     ch_engine: str = "ReplicatedMergeTree",
     ch_cluster: str = "{cluster}",
     sharding_key: str = "rand()",
-) -> None:
+    dry_run: bool = False,
+    return_sql: bool = False,
+    query_label: str | None = None,
+) -> SqlPlan | None:
     config = get_connection_config(db_key)
     if config.backend != "ch":
         raise UnsupportedConnectionTypeError(
@@ -46,6 +51,39 @@ def ch_create_table_as(
     target_table = _normalize_non_empty_string(table_name, "table_name")
     query_sql = _normalize_single_query(query)
     cluster_name = _normalize_non_empty_string(ch_cluster, "ch_cluster")
+
+    if dry_run or return_sql:
+        target_shard_table = build_ch_shard_table_name(target_table)
+        plan = SqlPlan(
+            operation="ch_create_table_as",
+            target_alias=config.connection_key,
+            target_backend=config.backend,
+            target_table=target_table,
+            options={
+                "ch_partition_by": ch_partition_by,
+                "ch_order_by": ch_order_by,
+                "ch_engine": ch_engine,
+                "ch_cluster": cluster_name,
+                "sharding_key": sharding_key,
+            },
+        )
+        for sql in [
+            f"DROP TABLE IF EXISTS {target_table}",
+            f"DROP TABLE IF EXISTS {target_shard_table}",
+            f"DROP TABLE IF EXISTS {target_table} ON CLUSTER '{cluster_name}'",
+            f"DROP TABLE IF EXISTS {target_shard_table} ON CLUSTER '{cluster_name}'",
+            f"CREATE TABLE IF NOT EXISTS {target_shard_table} (<query schema>)",
+            f"CREATE TABLE IF NOT EXISTS {target_table} (<query schema>)",
+            _build_insert_select_sql(target_table, query_sql),
+        ]:
+            plan.add(
+                sql,
+                alias=config.connection_key,
+                backend=config.backend,
+                target_table=target_table,
+                query_label=query_label,
+            )
+        return plan
 
     connection = get_sql_connection(config.connection_key)
     try:
@@ -62,6 +100,7 @@ def ch_create_table_as(
             connection,
             target_table,
             ch_cluster=cluster_name,
+            query_label=query_label,
         )
 
         time_print(f"Inferring ClickHouse schema for {target_table}")
@@ -76,6 +115,7 @@ def ch_create_table_as(
                 ch_engine=ch_engine,
                 ch_cluster=cluster_name,
                 ch_sharding_key=sharding_key,
+                query_label=query_label,
             )
         )
 
@@ -88,7 +128,9 @@ def ch_create_table_as(
         time_print(f"Waiting for target table {target_table}")
         _wait_for_ch_table(connection, target_table)
         time_print(f"Inserting query results into {target_table}")
-        connection.command(_build_insert_select_sql(target_table, query_sql))
+        connection.command(
+            apply_query_label(_build_insert_select_sql(target_table, query_sql), query_label)
+        )
         time_print(f"Finished creating ClickHouse table {target_table}")
     finally:
         time_print(f"Closing {config.connection_key} connection")
@@ -105,6 +147,7 @@ def build_ch_create_table_as_sqls(
     ch_engine: str = "ReplicatedMergeTree",
     ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
+    query_label: str | None = None,
 ) -> list[str]:
     target_table = _normalize_non_empty_string(table_name, "table_name")
     _normalize_single_query(query)
@@ -144,7 +187,11 @@ def build_ch_create_table_as_sqls(
         f"({columns_sql})\n"
         f"{distributed_engine_sql}"
     )
-    return [shard_sql, distributed_sql, local_distributed_sql]
+    return [
+        apply_query_label(shard_sql, query_label),
+        apply_query_label(distributed_sql, query_label),
+        apply_query_label(local_distributed_sql, query_label),
+    ]
 
 
 def _normalize_single_query(query: str) -> str:

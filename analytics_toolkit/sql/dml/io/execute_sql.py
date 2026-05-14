@@ -7,9 +7,16 @@ from typing import Any, Iterator
 import sqlparse
 from tqdm import tqdm
 
-from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
+from ...connection.errors import (
+    InvalidSqlInputError,
+    SqlOperationContext,
+    UnsupportedConnectionTypeError,
+    annotate_sql_exception,
+    sql_preview,
+)
 from ...connection.config import get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
+from ...labels import apply_query_label
 from ..transfer.runtime.retry import rollback_quietly, run_with_retry
 from analytics_toolkit.general import time_print
 
@@ -115,6 +122,7 @@ def execute_sql(
     gp_commit_each_statement: bool = False,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
+    query_label: str | None = None,
 ) -> Any:
     config = get_connection_config(connection_type)
     connection_key = config.connection_key
@@ -127,6 +135,7 @@ def execute_sql(
         raise ValueError("retry_cnt must be at least 1.")
     if timeout_increment < 0:
         raise ValueError("timeout_increment must be non-negative.")
+    sql = apply_query_label(sql, query_label)
 
     def operation(attempt: int) -> Any:
         connection = get_sql_connection(connection_key)
@@ -157,7 +166,18 @@ def execute_sql(
             raise UnsupportedConnectionTypeError(
                 "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
             )
-        except Exception:
+        except Exception as exc:
+            annotate_sql_exception(
+                exc,
+                SqlOperationContext(
+                    operation="execute_sql",
+                    alias=connection_key,
+                    backend=backend,
+                    phase="execute",
+                    retry_attempt=attempt,
+                    sql_preview=sql_preview(sql),
+                ),
+            )
             if backend == "gp":
                 rollback_quietly(connection)
             raise

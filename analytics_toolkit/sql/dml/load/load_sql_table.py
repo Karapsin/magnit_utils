@@ -9,6 +9,7 @@ import pandas as pd
 from psycopg2.extras import execute_values
 
 from ...ddl.create_sql_table import column_list_sql
+from ...labels import apply_query_label
 from ...connection.config import (
     TrinoConfig,
     get_connection_config,
@@ -35,6 +36,7 @@ def insert_table_batch(
     timeout_increment: int | float,
     target_column_types: dict[str, str] | None = None,
     trino_insert_chunk_size: int | None = None,
+    query_label: str | None = None,
 ) -> int:
     backend = resolve_connection_backend(connection_type)
     normalized_batch = normalize_batch(batch) if backend != "trino" else batch
@@ -43,7 +45,12 @@ def insert_table_batch(
         connection = connection_ref["connection"]
         try:
             if backend == "gp":
-                _insert_gp_batch(connection, table_name, normalized_batch)
+                _insert_gp_batch(
+                    connection,
+                    table_name,
+                    normalized_batch,
+                    query_label=query_label,
+                )
                 return len(normalized_batch)
             if backend == "trino":
                 _insert_trino_batch(
@@ -53,6 +60,7 @@ def insert_table_batch(
                     target_column_types=target_column_types,
                     trino_insert_chunk_size=trino_insert_chunk_size,
                     connection_type=connection_type,
+                    query_label=query_label,
                 )
                 return len(normalized_batch)
             if backend == "ch":
@@ -96,10 +104,18 @@ def normalize_batch(batch: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def _insert_gp_batch(connection: Any, table_name: str, batch: pd.DataFrame) -> None:
+def _insert_gp_batch(
+    connection: Any,
+    table_name: str,
+    batch: pd.DataFrame,
+    query_label: str | None = None,
+) -> None:
     column_list = column_list_sql(batch.columns, "gp")
     rows = list(batch.itertuples(index=False, name=None))
-    sql = f"INSERT INTO {table_name} ({column_list}) VALUES %s"
+    sql = apply_query_label(
+        f"INSERT INTO {table_name} ({column_list}) VALUES %s",
+        query_label,
+    )
 
     cursor = connection.cursor()
     try:
@@ -119,6 +135,7 @@ def _insert_trino_batch(
     target_column_types: dict[str, str] | None = None,
     trino_insert_chunk_size: int | None = None,
     connection_type: str = "trino",
+    query_label: str | None = None,
 ) -> None:
     column_list = column_list_sql(batch.columns, "trino")
     column_count = len(batch.columns)
@@ -133,7 +150,10 @@ def _insert_trino_batch(
         for row_chunk in _chunk_rows(row_iterator, chunk_size):
             values_sql = ", ".join(row_placeholders for _ in row_chunk)
             params = [value for row in row_chunk for value in row]
-            sql = f"INSERT INTO {table_name} ({column_list}) VALUES {values_sql}"
+            sql = apply_query_label(
+                f"INSERT INTO {table_name} ({column_list}) VALUES {values_sql}",
+                query_label,
+            )
             time_print(f"Writing {len(row_chunk)} row(s) to trino table {table_name}")
             cursor.execute(sql, params)
     finally:

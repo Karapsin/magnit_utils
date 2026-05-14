@@ -153,6 +153,34 @@ def test_schema_only_creation_uses_native_metadata_types(monkeypatch) -> None:
     assert connection.close_calls == 1
 
 
+def test_schema_only_creation_falls_back_for_gp_unbounded_numeric(
+    monkeypatch,
+) -> None:
+    connection = FakeDbapiConnection(
+        description=[
+            ("quantity", 1700, None, None, 65535, 0),
+        ]
+    )
+    monkeypatch.setattr(
+        create_module,
+        "get_sql_connection",
+        lambda connection_key: connection,
+    )
+
+    create_module.create_table_from_sql(
+        "gp",
+        "sandbox.target_table",
+        "select quantity from source_table;",
+    )
+
+    assert any(
+        sql.startswith("CREATE TABLE sandbox.target_table")
+        and '"quantity" NUMERIC' in sql
+        and '"quantity" NUMERIC(' not in sql
+        for sql in connection.executed
+    )
+
+
 def test_cross_backend_creation_maps_types_to_clickhouse_and_creates_pair(
     monkeypatch,
 ) -> None:

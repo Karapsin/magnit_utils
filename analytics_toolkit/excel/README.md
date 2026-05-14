@@ -23,6 +23,7 @@ pivoted_tables = pivot_and_break_table(
     break_by="qr_group",
     sheet_by="start_dt",
 )
+```
 
 By default both helpers replace an existing `output` workbook. Pass
 `append=True` to keep the existing file and add new sheets using the current
@@ -33,6 +34,18 @@ When writing multiple dataframes with `pivot_and_break_table`, pass
 order to the first dataframe. Missing row labels are written as blank rows; extra
 row labels in later dataframes raise a `ValueError`.
 
+Pass `prettify=True` to apply row-level numeric display formats in the Excel
+file. Returned dataframes and raw Excel cell values are unchanged. For each
+table body row, text cells are ignored and only numeric cells are formatted:
+
+- all numeric values in `0..1`: one-decimal percentages, `0.0%`
+- otherwise all numeric values in `-100..100`: one-decimal numbers, `0.0`
+- otherwise: whole numbers with thousands grouping, `#,##0`
+
+Rows with no numeric values and all header or group-title cells keep their
+default formatting.
+
+```python
 wide_tables = pivot_and_break_table(
     df=wide_dataframe,
     rows="metric",
@@ -67,6 +80,7 @@ combined_tables = pivot_and_break_table(
     columns="ab_group",
     break_by="qr_group",
     sheet_by="start_dt",
+    prettify=True,
 )
 ```
 

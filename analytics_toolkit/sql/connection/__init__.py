@@ -1,5 +1,6 @@
 from .config import (
     ChConfig,
+    ConnectionValidationResult,
     GpConfig,
     TrinoConfig,
     get_connection_backend,
@@ -7,9 +8,12 @@ from .config import (
     get_connections_file_path,
     load_sql_connections,
     resolve_connection_backend,
+    validate_connections,
 )
 from .errors import (
     InvalidSqlInputError,
+    SqlOperationContext,
+    SqlOperationError,
     SqlConfigError,
     SqlUtilsError,
     UnsupportedConnectionTypeError,
@@ -19,8 +23,11 @@ from analytics_toolkit.general import time_print
 
 __all__ = [
     "ChConfig",
+    "ConnectionValidationResult",
     "GpConfig",
     "InvalidSqlInputError",
+    "SqlOperationContext",
+    "SqlOperationError",
     "SqlConfigError",
     "SqlUtilsError",
     "TrinoConfig",
@@ -32,5 +39,6 @@ __all__ = [
     "load_sql_connections",
     "resolve_connection_backend",
     "time_print",
+    "validate_connections",
     "with_sql_connection",
 ]
