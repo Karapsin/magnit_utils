@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import pandas as pd
+from tqdm import tqdm
 
 from ...capabilities import validate_write_mode
 from ...ch_options import (
@@ -77,6 +78,7 @@ def load_df(
     return_metadata: bool = False,
     query_label: str | None = None,
     gp_insert_chunk_size: int | None = None,
+    progress: bool = True,
 ) -> int | SqlPlan | SqlOperationResult:
     if not isinstance(df, pd.DataFrame):
         raise TypeError("df must be a pandas DataFrame.")
@@ -84,6 +86,7 @@ def load_df(
         raise ValueError("retry_cnt must be at least 1.")
     if timeout_increment < 0:
         raise ValueError("timeout_increment must be non-negative.")
+    _validate_progress(progress)
 
     options = _build_load_options(
         connection_type=connection_type,
@@ -130,12 +133,23 @@ def load_df(
             df=df,
         )
 
-        inserted_rows = _load_dataframe(
+        progress_bar = _make_load_progress_bar(
+            total=len(df),
             options=options,
-            state=state,
-            connection_ref=connection_ref,
-            df=df,
+            progress=progress,
         )
+        progress_tracker = _ProgressTracker(progress_bar)
+        try:
+            inserted_rows = _load_dataframe(
+                options=options,
+                state=state,
+                connection_ref=connection_ref,
+                df=df,
+                on_progress=progress_tracker.update,
+            )
+            progress_tracker.complete_to(inserted_rows)
+        finally:
+            progress_bar.close()
 
         _analyze_load_target(options, connection_ref["connection"])
         time_print(
@@ -659,6 +673,7 @@ def _load_dataframe(
     state: LoadState,
     connection_ref: dict[str, Any],
     df: pd.DataFrame,
+    on_progress: Any | None = None,
 ) -> int:
     if options.append and state.target_exists and options.key_columns:
         state.overlap_stage_table = create_stage_table(
@@ -682,6 +697,7 @@ def _load_dataframe(
             trino_insert_chunk_size=options.trino_insert_chunk_size,
             gp_insert_chunk_size=options.gp_insert_chunk_size,
             query_label=options.query_label,
+            on_progress=on_progress,
         )
         validate_stage_target_key_overlap(
             connection_type=options.connection_backend,
@@ -713,7 +729,42 @@ def _load_dataframe(
         trino_insert_chunk_size=options.trino_insert_chunk_size,
         gp_insert_chunk_size=options.gp_insert_chunk_size,
         query_label=options.query_label,
+        on_progress=on_progress,
     )
+
+
+class _ProgressTracker:
+    def __init__(self, progress_bar: Any) -> None:
+        self.progress_bar = progress_bar
+        self.rows = 0
+
+    def update(self, rows: int) -> None:
+        self.rows += rows
+        self.progress_bar.update(rows)
+
+    def complete_to(self, rows: int) -> None:
+        remaining_rows = rows - self.rows
+        if remaining_rows > 0:
+            self.update(remaining_rows)
+
+
+def _make_load_progress_bar(
+    *,
+    total: int,
+    options: LoadOptions,
+    progress: bool,
+) -> Any:
+    return tqdm(
+        total=total,
+        desc=f"load_df {options.connection_key}.{options.destination_table}",
+        unit="row",
+        disable=not progress,
+    )
+
+
+def _validate_progress(progress: bool) -> None:
+    if not isinstance(progress, bool):
+        raise ValueError("progress must be a boolean.")
 
 
 def _cleanup_load(

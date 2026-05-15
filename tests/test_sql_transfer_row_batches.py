@@ -185,3 +185,181 @@ def test_load_stage_batches_fetches_row_batches_with_adaptive_sizes(monkeypatch)
     assert total_rows == 10
     assert inserted_batch_sizes == [2, 3, 4, 1]
     assert source.cursor_obj.fetch_sizes == [2, 3, 4, 2, 1]
+
+
+def test_load_stage_batches_updates_progress_bar(monkeypatch) -> None:
+    source = RecordingSourceConnection(rows=[(row_id,) for row_id in range(3)])
+    connection_refs = models_module.TransferConnectionRefs(
+        source={"connection": source},
+        target={"connection": object()},
+    )
+    stage_state = models_module.TransferStageState(
+        target_exists=False,
+        stage_column_types={"id": "INTEGER"},
+    )
+    options = models_module.TransferOptions(
+        from_db_key="gp",
+        from_db_backend="gp",
+        to_db_key="gp_sandbox",
+        to_db_backend="gp",
+        source_sql="select id from source_table",
+        target_table="sandbox.target",
+        batch_size=2,
+        adaptive_batch_size=False,
+        min_batch_size=1,
+        max_batch_size=4,
+        target_batch_seconds=10.0,
+    )
+    progress_bars: list[Any] = []
+
+    class FakeTqdm:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.updates: list[int] = []
+            self.closed = False
+            progress_bars.append(self)
+
+        def update(self, value: int) -> None:
+            self.updates.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_initialize_stage_for_first_batch(
+        options: object,
+        connection_refs: object,
+        stage_state: object,
+        batch: object,
+    ) -> None:
+        del options, connection_refs
+        stage_state.first_non_empty_batch = batch.to_dataframe()
+        stage_state.stage_table = "sandbox.target__stage__abcd1234"
+
+    def fake_insert_rows_batch(
+        connection_type: str,
+        connection_ref: dict[str, Any],
+        table_name: str,
+        columns: list[str],
+        rows: list[tuple[int]],
+        **kwargs: Any,
+    ) -> int:
+        del connection_type, connection_ref, table_name, columns
+        kwargs["on_progress"](len(rows))
+        kwargs["on_success"](1.0)
+        return len(rows)
+
+    monkeypatch.setattr(attempt_module, "tqdm", FakeTqdm)
+    monkeypatch.setattr(
+        attempt_module,
+        "initialize_stage_for_first_batch",
+        fake_initialize_stage_for_first_batch,
+    )
+    monkeypatch.setattr(attempt_module, "insert_rows_batch", fake_insert_rows_batch)
+
+    total_rows = attempt_module.load_stage_batches(
+        options=options,
+        connection_refs=connection_refs,
+        stage_state=stage_state,
+        read_retry_cnt=1,
+        insert_retry_cnt=1,
+    )
+
+    assert total_rows == 3
+    assert len(progress_bars) == 1
+    assert progress_bars[0].kwargs == {
+        "total": None,
+        "desc": "transfer_table gp_sandbox.sandbox.target",
+        "unit": "row",
+        "disable": False,
+    }
+    assert progress_bars[0].updates == [2, 1]
+    assert progress_bars[0].closed is True
+
+
+def test_load_stage_batches_progress_false_disables_bar(monkeypatch) -> None:
+    source = RecordingSourceConnection(rows=[(1,), (2,)])
+    connection_refs = models_module.TransferConnectionRefs(
+        source={"connection": source},
+        target={"connection": object()},
+    )
+    stage_state = models_module.TransferStageState(
+        target_exists=False,
+        stage_column_types={"id": "INTEGER"},
+    )
+    options = models_module.TransferOptions(
+        from_db_key="gp",
+        from_db_backend="gp",
+        to_db_key="gp_sandbox",
+        to_db_backend="gp",
+        source_sql="select id from source_table",
+        target_table="sandbox.target",
+        batch_size=2,
+        adaptive_batch_size=False,
+        min_batch_size=1,
+        max_batch_size=4,
+        target_batch_seconds=10.0,
+        progress=False,
+    )
+    progress_bars: list[Any] = []
+
+    class FakeTqdm:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.updates: list[int] = []
+            self.closed = False
+            progress_bars.append(self)
+
+        def update(self, value: int) -> None:
+            self.updates.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_initialize_stage_for_first_batch(
+        options: object,
+        connection_refs: object,
+        stage_state: object,
+        batch: object,
+    ) -> None:
+        del options, connection_refs
+        stage_state.first_non_empty_batch = batch.to_dataframe()
+        stage_state.stage_table = "sandbox.target__stage__abcd1234"
+
+    monkeypatch.setattr(attempt_module, "tqdm", FakeTqdm)
+    monkeypatch.setattr(
+        attempt_module,
+        "initialize_stage_for_first_batch",
+        fake_initialize_stage_for_first_batch,
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "insert_rows_batch",
+        lambda *args, **kwargs: len(args[4]),
+    )
+
+    total_rows = attempt_module.load_stage_batches(
+        options=options,
+        connection_refs=connection_refs,
+        stage_state=stage_state,
+        read_retry_cnt=1,
+        insert_retry_cnt=1,
+    )
+
+    assert total_rows == 2
+    assert len(progress_bars) == 1
+    assert progress_bars[0].kwargs["disable"] is True
+    assert progress_bars[0].updates == [2]
+    assert progress_bars[0].closed is True
+
+
+@pytest.mark.parametrize("progress", [None, 0, 1, "yes"])
+def test_transfer_table_validates_progress(progress: Any) -> None:
+    with pytest.raises(ValueError, match="progress"):
+        transfer_api_module.transfer_table(
+            from_db="gp",
+            to_db="trino",
+            from_sql="select id from source_table",
+            to_table="sandbox.target",
+            dry_run=True,
+            progress=progress,
+        )

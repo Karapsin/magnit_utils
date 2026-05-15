@@ -26,8 +26,8 @@ sql.gp_vacuum(...)
 sql.create_sql_table(...)
 sql.ch_create_table_as(...)
 sql.create_table_from_sql(...)
-sql.load_df(..., retry_cnt=5, timeout_increment=5)
-sql.transfer(..., batch_size=100_000, adaptive_batch_size=True)
+sql.load_df(..., retry_cnt=5, timeout_increment=5, progress=True)
+sql.transfer(..., batch_size=100_000, adaptive_batch_size=True, progress=True)
 sql.ch_full_table_move(...)
 sql.get_sql_connection(...)
 ```
@@ -56,6 +56,10 @@ sql.get_sql_connection(...)
 `read_sql`, `execute_sql`, `execute_read`, `load_df`, and `transfer_table` all
 support `retry_cnt` and `timeout_increment`. Retries restart the whole public
 operation from the beginning with a fresh connection.
+
+`load_df` and `transfer_table` show `tqdm` row progress bars by default during
+data loading. Pass `progress=False` to silence those bars. `dry_run=True` and
+`return_sql=True` return plans without creating progress bars.
 
 `execute_read` accepts the same execution options as `execute_sql`. It splits
 the provided SQL into statements, executes every statement except the last, then

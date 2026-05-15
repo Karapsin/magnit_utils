@@ -64,6 +64,7 @@ def transfer_table(
     return_sql: bool = False,
     return_metadata: bool = False,
     query_label: str | None = None,
+    progress: bool = True,
 ) -> int | SqlPlan | SqlOperationResult:
     options = build_transfer_options(
         from_db=from_db,
@@ -90,6 +91,7 @@ def transfer_table(
         ch_cluster=ch_cluster,
         ch_sharding_key=sharding_key,
         query_label=query_label,
+        progress=progress,
     )
 
     if dry_run or return_sql:
@@ -207,6 +209,7 @@ def build_transfer_options(
     ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
     query_label: str | None = None,
+    progress: bool = True,
 ) -> TransferOptions:
     from_config = get_connection_config(from_db)
     to_config = get_connection_config(to_db)
@@ -263,6 +266,7 @@ def build_transfer_options(
         ch_cluster=normalize_ch_string(ch_cluster, "ch_cluster"),
         ch_sharding_key=normalize_ch_string(ch_sharding_key, "sharding_key"),
         query_label=query_label,
+        progress=progress,
     )
 
     if options.from_db_key == options.to_db_key:
@@ -281,6 +285,7 @@ def build_transfer_options(
         raise ValueError("full_retry_cnt must be at least 1.")
     if options.full_timeout_increment < 0:
         raise ValueError("full_timeout_increment must be non-negative.")
+    _validate_progress(options.progress)
     if options.gp_distributed_by_key is not None and options.to_db_backend != "gp":
         raise ValueError(
             "gp_distributed_by_key can only be used when to_db has type 'gp'."
@@ -358,6 +363,11 @@ def _resolve_transfer_write_mode(
             "other than 'append'."
         )
     return normalized
+
+
+def _validate_progress(progress: bool) -> None:
+    if not isinstance(progress, bool):
+        raise ValueError("progress must be a boolean.")
 
 
 def build_transfer_table_plan(options: TransferOptions) -> SqlPlan:

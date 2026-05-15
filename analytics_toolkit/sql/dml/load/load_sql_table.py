@@ -39,6 +39,7 @@ def insert_table_batch(
     trino_insert_chunk_size: int | None = None,
     gp_insert_chunk_size: int | None = None,
     query_label: str | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> int:
     backend = resolve_connection_backend(connection_type)
     normalized_batch = normalize_batch(batch) if backend != "trino" else batch
@@ -56,6 +57,7 @@ def insert_table_batch(
                 gp_insert_chunk_size=gp_insert_chunk_size,
                 connection_type=connection_type,
                 query_label=query_label,
+                on_progress=on_progress,
             )
             return len(normalized_batch)
         except Exception as exc:
@@ -98,6 +100,7 @@ def insert_rows_batch(
     gp_insert_chunk_size: int | None = None,
     query_label: str | None = None,
     on_success: Callable[[float], None] | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> int:
     backend = resolve_connection_backend(connection_type)
     row_tuples = [tuple(row) for row in rows]
@@ -122,6 +125,7 @@ def insert_rows_batch(
                 gp_insert_chunk_size=gp_insert_chunk_size,
                 connection_type=connection_type,
                 query_label=query_label,
+                on_progress=on_progress,
             )
             duration_seconds = time.perf_counter() - started_at
         except Exception as exc:
@@ -172,6 +176,7 @@ def _insert_gp_batch(
     batch: pd.DataFrame,
     gp_insert_chunk_size: int | None = None,
     query_label: str | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> None:
     rows = list(batch.itertuples(index=False, name=None))
     _insert_gp_rows(
@@ -181,6 +186,7 @@ def _insert_gp_batch(
         rows,
         gp_insert_chunk_size=gp_insert_chunk_size,
         query_label=query_label,
+        on_progress=on_progress,
     )
 
 
@@ -191,6 +197,7 @@ def _insert_gp_rows(
     rows: Sequence[Sequence[Any]],
     gp_insert_chunk_size: int | None = None,
     query_label: str | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> None:
     row_tuples = [tuple(row) for row in rows]
     if not row_tuples:
@@ -201,7 +208,10 @@ def _insert_gp_rows(
 
     cursor = connection.cursor()
     try:
-        execute_values(cursor, sql, row_tuples, page_size=page_size)
+        for row_chunk in _chunk_sequence(row_tuples, page_size):
+            execute_values(cursor, sql, row_chunk, page_size=page_size)
+            if on_progress is not None:
+                on_progress(len(row_chunk))
         connection.commit()
     except Exception:
         connection.rollback()
@@ -218,6 +228,7 @@ def _insert_trino_batch(
     trino_insert_chunk_size: int | None = None,
     connection_type: str = "trino",
     query_label: str | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> None:
     rows = list(batch.itertuples(index=False, name=None))
     _insert_trino_rows(
@@ -229,6 +240,7 @@ def _insert_trino_batch(
         trino_insert_chunk_size=trino_insert_chunk_size,
         connection_type=connection_type,
         query_label=query_label,
+        on_progress=on_progress,
     )
 
 
@@ -241,6 +253,7 @@ def _insert_trino_rows(
     trino_insert_chunk_size: int | None = None,
     connection_type: str = "trino",
     query_label: str | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> None:
     chunk_size = _get_trino_insert_chunk_size(
         trino_insert_chunk_size,
@@ -259,6 +272,8 @@ def _insert_trino_rows(
             )
             time_print(f"Writing {len(row_chunk)} row(s) to trino table {table_name}")
             cursor.execute(sql, params)
+            if on_progress is not None:
+                on_progress(len(row_chunk))
     finally:
         cursor.close()
 
@@ -293,13 +308,20 @@ def build_trino_batch_insert_sql(
     )
 
 
-def _insert_ch_batch(client: Any, table_name: str, batch: pd.DataFrame) -> None:
+def _insert_ch_batch(
+    client: Any,
+    table_name: str,
+    batch: pd.DataFrame,
+    on_progress: Callable[[int], None] | None = None,
+) -> None:
     normalized_batch = normalize_ch_batch(batch)
     client.insert_df(
         table=table_name,
         df=normalized_batch,
         column_names=list(batch.columns),
     )
+    if on_progress is not None:
+        on_progress(len(batch))
 
 
 def _insert_ch_rows(
@@ -308,6 +330,7 @@ def _insert_ch_rows(
     columns: Sequence[str],
     rows: Sequence[Sequence[Any]],
     column_types: dict[str, str] | None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> None:
     client.insert(
         table=table_name,
@@ -315,6 +338,8 @@ def _insert_ch_rows(
         column_names=list(columns),
         column_type_names=_column_type_names(columns, column_types),
     )
+    if on_progress is not None:
+        on_progress(len(rows))
 
 
 _BATCH_INSERT_FUNCTION_NAMES = {
@@ -341,6 +366,7 @@ def _insert_batch_backend(
     gp_insert_chunk_size: int | None,
     connection_type: str,
     query_label: str | None,
+    on_progress: Callable[[int], None] | None,
 ) -> None:
     function_name = _BATCH_INSERT_FUNCTION_NAMES.get(backend)
     if function_name is None:
@@ -354,6 +380,7 @@ def _insert_batch_backend(
             batch,
             gp_insert_chunk_size=gp_insert_chunk_size,
             query_label=query_label,
+            on_progress=on_progress,
         )
         return
     if backend == "trino":
@@ -365,9 +392,10 @@ def _insert_batch_backend(
             trino_insert_chunk_size=trino_insert_chunk_size,
             connection_type=connection_type,
             query_label=query_label,
+            on_progress=on_progress,
         )
         return
-    globals()[function_name](connection, table_name, batch)
+    globals()[function_name](connection, table_name, batch, on_progress=on_progress)
 
 
 def _insert_rows_backend(
@@ -382,6 +410,7 @@ def _insert_rows_backend(
     gp_insert_chunk_size: int | None,
     connection_type: str,
     query_label: str | None,
+    on_progress: Callable[[int], None] | None,
 ) -> None:
     function_name = _ROW_INSERT_FUNCTION_NAMES.get(backend)
     if function_name is None:
@@ -396,6 +425,7 @@ def _insert_rows_backend(
             rows,
             gp_insert_chunk_size=gp_insert_chunk_size,
             query_label=query_label,
+            on_progress=on_progress,
         )
         return
     if backend == "trino":
@@ -408,9 +438,17 @@ def _insert_rows_backend(
             trino_insert_chunk_size=trino_insert_chunk_size,
             connection_type=connection_type,
             query_label=query_label,
+            on_progress=on_progress,
         )
         return
-    globals()[function_name](connection, table_name, columns, rows, target_column_types)
+    globals()[function_name](
+        connection,
+        table_name,
+        columns,
+        rows,
+        target_column_types,
+        on_progress=on_progress,
+    )
 
 
 def normalize_ch_batch(batch: pd.DataFrame) -> pd.DataFrame:
@@ -507,6 +545,14 @@ def _chunk_rows(
         if not chunk:
             return
         yield chunk
+
+
+def _chunk_sequence(
+    rows: Sequence[tuple[Any, ...]],
+    chunk_size: int,
+) -> Iterator[list[tuple[Any, ...]]]:
+    for start in range(0, len(rows), chunk_size):
+        yield list(rows[start : start + chunk_size])
 
 
 def _trino_literal(value: Any, target_type: str | None) -> str:

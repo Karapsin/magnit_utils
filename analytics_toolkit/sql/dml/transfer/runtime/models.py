@@ -75,6 +75,7 @@ class TransferOptions:
     ch_cluster: str = "{cluster}"
     ch_sharding_key: str = "rand()"
     query_label: str | None = None
+    progress: bool = True
 
 
 @dataclass

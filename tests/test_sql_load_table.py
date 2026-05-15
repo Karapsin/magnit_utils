@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -111,6 +112,136 @@ def test_insert_table_batch_normalizes_decimal_for_clickhouse() -> None:
     assert inserted_df["count"].tolist() == [1, 2]
 
 
+def test_load_df_updates_progress_bar(monkeypatch) -> None:
+    client = FakeClickHouseClient()
+    progress_bars: list[object] = []
+    batch = pd.DataFrame({"id": [1, 2, 3], "value": ["a", "b", "c"]})
+
+    class FakeTqdm:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.updates: list[int] = []
+            self.closed = False
+            progress_bars.append(self)
+
+        def update(self, value: int) -> None:
+            self.updates.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_insert_table_batch(*args, **kwargs) -> int:
+        df = args[3]
+        kwargs["on_progress"](len(df))
+        return len(df)
+
+    monkeypatch.setattr(load_df_module, "tqdm", FakeTqdm)
+    monkeypatch.setattr(load_df_module, "get_sql_connection", lambda key: client)
+    monkeypatch.setattr(load_df_module, "table_exists", lambda *args, **kwargs: False)
+    monkeypatch.setattr(load_df_module, "create_sql_table", lambda *args, **kwargs: None)
+    monkeypatch.setattr(load_df_module, "insert_table_batch", fake_insert_table_batch)
+    monkeypatch.setattr(load_df_module, "analyze_table", lambda *args, **kwargs: None)
+
+    inserted_rows = load_df_module.load_df(
+        "ch",
+        TEST_CH_TABLE,
+        batch,
+        retry_cnt=1,
+        timeout_increment=0,
+    )
+
+    assert inserted_rows == 3
+    assert len(progress_bars) == 1
+    progress_bar = progress_bars[0]
+    assert progress_bar.kwargs == {
+        "total": 3,
+        "desc": f"load_df ch.{TEST_CH_TABLE}",
+        "unit": "row",
+        "disable": False,
+    }
+    assert progress_bar.updates == [3]
+    assert progress_bar.closed is True
+
+
+def test_load_df_progress_false_disables_bar(monkeypatch) -> None:
+    client = FakeClickHouseClient()
+    progress_bars: list[object] = []
+    batch = pd.DataFrame({"id": [1, 2]})
+
+    class FakeTqdm:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.updates: list[int] = []
+            self.closed = False
+            progress_bars.append(self)
+
+        def update(self, value: int) -> None:
+            self.updates.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(load_df_module, "tqdm", FakeTqdm)
+    monkeypatch.setattr(load_df_module, "get_sql_connection", lambda key: client)
+    monkeypatch.setattr(load_df_module, "table_exists", lambda *args, **kwargs: False)
+    monkeypatch.setattr(load_df_module, "create_sql_table", lambda *args, **kwargs: None)
+    monkeypatch.setattr(load_df_module, "insert_table_batch", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(load_df_module, "analyze_table", lambda *args, **kwargs: None)
+
+    inserted_rows = load_df_module.load_df(
+        "ch",
+        TEST_CH_TABLE,
+        batch,
+        retry_cnt=1,
+        timeout_increment=0,
+        progress=False,
+    )
+
+    assert inserted_rows == 2
+    assert len(progress_bars) == 1
+    assert progress_bars[0].kwargs["disable"] is True
+    assert progress_bars[0].updates == [2]
+    assert progress_bars[0].closed is True
+
+
+def test_load_df_dry_run_does_not_create_progress_bar(monkeypatch) -> None:
+    progress_bars: list[object] = []
+
+    class FakeTqdm:
+        def __init__(self, **kwargs: object) -> None:
+            progress_bars.append(self)
+
+        def update(self, value: int) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(load_df_module, "tqdm", FakeTqdm)
+
+    plan = load_df_module.load_df(
+        "gp",
+        "sandbox.target",
+        pd.DataFrame({"id": [1]}),
+        dry_run=True,
+    )
+
+    assert plan.operation == "load_df"
+    assert progress_bars == []
+
+
+@pytest.mark.parametrize("progress", [None, 0, 1, "yes"])
+def test_load_df_validates_progress(progress: object) -> None:
+    with pytest.raises(ValueError, match="progress"):
+        load_df_module.load_df(
+            "gp",
+            "sandbox.target",
+            pd.DataFrame({"id": [1]}),
+            dry_run=True,
+            progress=progress,
+        )
+
+
 def test_insert_rows_batch_gp_uses_row_tuples_and_normalizes_nulls(monkeypatch) -> None:
     connection = FakeDbapiConnection()
     captured: dict[str, object] = {}
@@ -142,12 +273,17 @@ def test_insert_rows_batch_gp_uses_row_tuples_and_normalizes_nulls(monkeypatch) 
 
 def test_insert_rows_batch_gp_honors_insert_chunk_size(monkeypatch) -> None:
     connection = FakeDbapiConnection()
-    captured: dict[str, object] = {}
+    captured_calls: list[dict[str, object]] = []
+    progress_updates: list[int] = []
 
     def fake_execute_values(cursor, sql, rows, page_size):
         del cursor, sql
-        captured["rows"] = list(rows)
-        captured["page_size"] = page_size
+        captured_calls.append(
+            {
+                "rows": list(rows),
+                "page_size": page_size,
+            }
+        )
 
     monkeypatch.setattr(load_sql_table_module, "execute_values", fake_execute_values)
 
@@ -161,16 +297,21 @@ def test_insert_rows_batch_gp_honors_insert_chunk_size(monkeypatch) -> None:
         retry_cnt=1,
         timeout_increment=0,
         gp_insert_chunk_size=2,
+        on_progress=progress_updates.append,
     )
 
     assert inserted_rows == 3
-    assert captured["rows"] == [(1,), (2,), (3,)]
-    assert captured["page_size"] == 2
+    assert captured_calls == [
+        {"rows": [(1,), (2,)], "page_size": 2},
+        {"rows": [(3,)], "page_size": 2},
+    ]
+    assert progress_updates == [2, 1]
     assert connection.commit_calls == 1
 
 
 def test_insert_rows_batch_trino_normalizes_values_and_splits_chunks() -> None:
     connection = FakeDbapiConnection()
+    progress_updates: list[int] = []
 
     inserted_rows = load_sql_table_module.insert_rows_batch(
         connection_type="trino",
@@ -183,6 +324,7 @@ def test_insert_rows_batch_trino_normalizes_values_and_splits_chunks() -> None:
         timeout_increment=0,
         target_column_types={"id": "bigint", "label": "varchar"},
         trino_insert_chunk_size=2,
+        on_progress=progress_updates.append,
     )
 
     assert inserted_rows == 3
@@ -194,10 +336,12 @@ def test_insert_rows_batch_trino_normalizes_values_and_splits_chunks() -> None:
         [1, "a", 2, None],
         [3, "c"],
     ]
+    assert progress_updates == [2, 1]
 
 
 def test_insert_rows_batch_clickhouse_uses_rows_and_column_type_names() -> None:
     client = FakeClickHouseClient()
+    progress_updates: list[int] = []
 
     inserted_rows = load_sql_table_module.insert_rows_batch(
         connection_type="ch",
@@ -212,9 +356,11 @@ def test_insert_rows_batch_clickhouse_uses_rows_and_column_type_names() -> None:
             "amount": "Nullable(Decimal(10, 2))",
             "label": "Nullable(String)",
         },
+        on_progress=progress_updates.append,
     )
 
     assert inserted_rows == 2
+    assert progress_updates == [2]
     assert client.calls == [
         {
             "table": "schema.stage_table",
