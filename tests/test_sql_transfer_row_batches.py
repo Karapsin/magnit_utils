@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import importlib
+import sys
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+attempt_module = importlib.import_module(
+    "analytics_toolkit.sql.dml.transfer.flow.attempt"
+)
+transfer_api_module = importlib.import_module(
+    "analytics_toolkit.sql.dml.transfer.flow.api"
+)
+models_module = importlib.import_module(
+    "analytics_toolkit.sql.dml.transfer.runtime.models"
+)
+
+
+class RecordingSourceCursor:
+    def __init__(self, rows: list[tuple[int]]) -> None:
+        self._rows = rows
+        self.description = [("id", 23, None, None, None, None)]
+        self.fetch_sizes: list[int] = []
+        self.executed: list[str] = []
+        self.close_calls = 0
+
+    def execute(self, query: str) -> None:
+        self.executed.append(query)
+
+    def fetchmany(self, size: int) -> list[tuple[int]]:
+        self.fetch_sizes.append(size)
+        batch = self._rows[:size]
+        self._rows = self._rows[size:]
+        return batch
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class RecordingSourceConnection:
+    def __init__(self, rows: list[tuple[int]]) -> None:
+        self.cursor_obj = RecordingSourceCursor(rows)
+
+    def cursor(self) -> RecordingSourceCursor:
+        return self.cursor_obj
+
+
+def test_adaptive_batch_sizer_grows_shrinks_caps_floors_and_can_disable() -> None:
+    sizer = models_module.AdaptiveBatchSizer(
+        enabled=True,
+        current_size=1_000,
+        min_size=500,
+        max_size=2_000,
+        target_seconds=10.0,
+    )
+
+    sizer.update(4.9)
+    assert sizer.current_size == 1_500
+    sizer.update(4.9)
+    assert sizer.current_size == 2_000
+    sizer.update(10.0)
+    assert sizer.current_size == 2_000
+    sizer.update(21.0)
+    assert sizer.current_size == 1_000
+    sizer.update(21.0)
+    assert sizer.current_size == 500
+    sizer.update(21.0)
+    assert sizer.current_size == 500
+
+    disabled = models_module.AdaptiveBatchSizer(
+        enabled=False,
+        current_size=1_000,
+        min_size=500,
+        max_size=2_000,
+        target_seconds=10.0,
+    )
+    disabled.update(1.0)
+    assert disabled.current_size == 1_000
+
+
+def test_transfer_options_resolve_adaptive_bounds_and_validate() -> None:
+    options = transfer_api_module.build_transfer_options(
+        from_db="gp",
+        to_db="trino",
+        from_sql="select id from source_table",
+        to_table="sandbox.target",
+        batch_size=100,
+    )
+
+    assert options.min_batch_size == 100
+    assert options.max_batch_size == 400
+
+    with pytest.raises(ValueError, match="min_batch_size"):
+        transfer_api_module.build_transfer_options(
+            from_db="gp",
+            to_db="trino",
+            from_sql="select id from source_table",
+            to_table="sandbox.target",
+            batch_size=100,
+            min_batch_size=101,
+        )
+
+    with pytest.raises(ValueError, match="max_batch_size"):
+        transfer_api_module.build_transfer_options(
+            from_db="gp",
+            to_db="trino",
+            from_sql="select id from source_table",
+            to_table="sandbox.target",
+            batch_size=100,
+            max_batch_size=99,
+        )
+
+
+def test_load_stage_batches_fetches_row_batches_with_adaptive_sizes(monkeypatch) -> None:
+    source = RecordingSourceConnection(rows=[(row_id,) for row_id in range(10)])
+    connection_refs = models_module.TransferConnectionRefs(
+        source={"connection": source},
+        target={"connection": object()},
+    )
+    stage_state = models_module.TransferStageState(
+        target_exists=False,
+        stage_column_types={"id": "INTEGER"},
+    )
+    options = models_module.TransferOptions(
+        from_db_key="gp",
+        from_db_backend="gp",
+        to_db_key="gp_sandbox",
+        to_db_backend="gp",
+        source_sql="select id from source_table",
+        target_table="sandbox.target",
+        batch_size=2,
+        adaptive_batch_size=True,
+        min_batch_size=1,
+        max_batch_size=4,
+        target_batch_seconds=10.0,
+    )
+    inserted_batch_sizes: list[int] = []
+    insert_durations = iter([1.0, 1.0, 30.0, 30.0])
+
+    def fake_initialize_stage_for_first_batch(
+        options: object,
+        connection_refs: object,
+        stage_state: object,
+        batch: object,
+    ) -> None:
+        del options, connection_refs
+        stage_state.first_non_empty_batch = batch.to_dataframe()
+        stage_state.stage_table = "sandbox.target__stage__abcd1234"
+
+    def fake_insert_rows_batch(
+        connection_type: str,
+        connection_ref: dict[str, Any],
+        table_name: str,
+        columns: list[str],
+        rows: list[tuple[int]],
+        **kwargs: Any,
+    ) -> int:
+        del connection_type, connection_ref, table_name
+        assert columns == ["id"]
+        assert not isinstance(rows, pd.DataFrame)
+        inserted_batch_sizes.append(len(rows))
+        kwargs["on_success"](next(insert_durations))
+        return len(rows)
+
+    monkeypatch.setattr(
+        attempt_module,
+        "initialize_stage_for_first_batch",
+        fake_initialize_stage_for_first_batch,
+    )
+    monkeypatch.setattr(attempt_module, "insert_rows_batch", fake_insert_rows_batch)
+
+    total_rows = attempt_module.load_stage_batches(
+        options=options,
+        connection_refs=connection_refs,
+        stage_state=stage_state,
+        read_retry_cnt=1,
+        insert_retry_cnt=1,
+    )
+
+    assert total_rows == 10
+    assert inserted_batch_sizes == [2, 3, 4, 1]
+    assert source.cursor_obj.fetch_sizes == [2, 3, 4, 2, 1]

@@ -56,10 +56,12 @@ def test_load_df_dry_run_returns_ordered_labeled_plan() -> None:
         write_mode="truncate_insert",
         dry_run=True,
         query_label="daily scores",
+        gp_insert_chunk_size=5000,
     )
 
     assert plan.operation == "load_df"
     assert plan.target_alias == "gp"
+    assert plan.options["gp_insert_chunk_size"] == 5000
     assert [statement.phase for statement in plan.statements] == [
         "clear_target",
         "create_target",
@@ -108,6 +110,26 @@ def test_unsupported_upsert_mode_is_rejected() -> None:
         )
 
 
+def test_load_df_rejects_invalid_gp_insert_chunk_size() -> None:
+    with pytest.raises(ValueError, match="gp_insert_chunk_size"):
+        load_df_module.load_df(
+            "gp",
+            "sandbox.target",
+            pd.DataFrame({"id": [1]}),
+            gp_insert_chunk_size=0,
+            dry_run=True,
+        )
+
+    with pytest.raises(ValueError, match="connection_type has type 'gp'"):
+        load_df_module.load_df(
+            "trino",
+            "sandbox.target",
+            pd.DataFrame({"id": [1]}),
+            gp_insert_chunk_size=100,
+            dry_run=True,
+        )
+
+
 def test_read_sql_prefixes_query_label(monkeypatch) -> None:
     connection = FakeDbapiConnection(
         rows=[(1,)],
@@ -143,6 +165,10 @@ def test_transfer_dry_run_includes_source_stage_and_target_steps() -> None:
     assert plan.operation == "transfer_table"
     assert plan.source_alias == "gp"
     assert plan.target_alias == "trino"
+    assert plan.options["adaptive_batch_size"] is True
+    assert plan.options["min_batch_size"] == 1_000
+    assert plan.options["max_batch_size"] == 400_000
+    assert plan.options["target_batch_seconds"] == 10.0
     assert plan.statements[0].phase == "read_source"
     assert "query_label=copy-target" in plan.statements[0].sql
     assert plan.statements[-1].phase == "drop_stage"

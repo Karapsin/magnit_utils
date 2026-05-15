@@ -38,7 +38,7 @@ BACKEND_CAPABILITIES: dict[BackendName, BackendCapability] = {
         supports_distributed_tables=False,
         truncate_semantics="TRUNCATE TABLE",
         drop_semantics="DROP TABLE IF EXISTS",
-        create_semantics="CREATE TABLE with appendoptimized storage",
+        create_semantics="CREATE TABLE with append-only columnar storage",
         type_family="postgres",
         supported_write_modes=frozenset({"append", "replace", "truncate_insert"}),
     ),

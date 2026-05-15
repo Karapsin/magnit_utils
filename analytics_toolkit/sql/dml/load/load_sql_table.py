@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from decimal import Decimal
 from itertools import islice
 from typing import Any
@@ -23,6 +24,7 @@ class AmbiguousTableLoadError(Exception):
 
 
 DEFAULT_TRINO_INSERT_CHUNK_SIZE = 1000
+DEFAULT_GP_INSERT_CHUNK_SIZE = 10_000
 
 
 def insert_table_batch(
@@ -35,6 +37,7 @@ def insert_table_batch(
     timeout_increment: int | float,
     target_column_types: dict[str, str] | None = None,
     trino_insert_chunk_size: int | None = None,
+    gp_insert_chunk_size: int | None = None,
     query_label: str | None = None,
 ) -> int:
     backend = resolve_connection_backend(connection_type)
@@ -50,6 +53,7 @@ def insert_table_batch(
                 normalized_batch,
                 target_column_types=target_column_types,
                 trino_insert_chunk_size=trino_insert_chunk_size,
+                gp_insert_chunk_size=gp_insert_chunk_size,
                 connection_type=connection_type,
                 query_label=query_label,
             )
@@ -80,6 +84,76 @@ def insert_table_batch(
     )
 
 
+def insert_rows_batch(
+    connection_type: str,
+    connection_ref: dict[str, Any],
+    table_name: str,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    retry_fn: Any,
+    retry_cnt: int,
+    timeout_increment: int | float,
+    target_column_types: dict[str, str] | None = None,
+    trino_insert_chunk_size: int | None = None,
+    gp_insert_chunk_size: int | None = None,
+    query_label: str | None = None,
+    on_success: Callable[[float], None] | None = None,
+) -> int:
+    backend = resolve_connection_backend(connection_type)
+    row_tuples = [tuple(row) for row in rows]
+    if not row_tuples:
+        return 0
+    normalized_rows = (
+        row_tuples if backend in {"trino", "ch"} else normalize_rows(row_tuples)
+    )
+
+    def operation(attempt: int) -> int:
+        connection = connection_ref["connection"]
+        try:
+            started_at = time.perf_counter()
+            _insert_rows_backend(
+                backend,
+                connection,
+                table_name,
+                columns,
+                normalized_rows,
+                target_column_types=target_column_types,
+                trino_insert_chunk_size=trino_insert_chunk_size,
+                gp_insert_chunk_size=gp_insert_chunk_size,
+                connection_type=connection_type,
+                query_label=query_label,
+            )
+            duration_seconds = time.perf_counter() - started_at
+        except Exception as exc:
+            if backend == "gp":
+                if getattr(connection, "closed", 0):
+                    raise
+            else:
+                time_print(
+                    f"Stage insert on {connection_type} failed for {table_name}; "
+                    "the current stage table will be discarded and reloaded from scratch."
+                )
+                time_print(
+                    f"Original {connection_type} insert error for {table_name}: "
+                    f"{type(exc).__name__}: {exc!r}"
+                )
+                raise AmbiguousTableLoadError(
+                    f"Ambiguous stage insert outcome on {connection_type} for {table_name}"
+                ) from exc
+            raise
+
+        if on_success is not None:
+            on_success(duration_seconds)
+        return len(normalized_rows)
+
+    return retry_fn(
+        operation_name=f"inserting batch into stage table {table_name} on {connection_type}",
+        retry_cnt=retry_cnt,
+        timeout_increment=timeout_increment,
+        operation=operation,
+    )
+
+
 def normalize_batch(batch: pd.DataFrame) -> pd.DataFrame:
     normalized = batch.copy()
     for column_name in normalized.columns:
@@ -88,18 +162,46 @@ def normalize_batch(batch: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
+def normalize_rows(rows: Sequence[Sequence[Any]]) -> list[tuple[Any, ...]]:
+    return [tuple(_normalize_nullable_scalar(value) for value in row) for row in rows]
+
+
 def _insert_gp_batch(
     connection: Any,
     table_name: str,
     batch: pd.DataFrame,
+    gp_insert_chunk_size: int | None = None,
     query_label: str | None = None,
 ) -> None:
     rows = list(batch.itertuples(index=False, name=None))
-    sql = build_gp_batch_insert_sql(table_name, batch.columns, query_label=query_label)
+    _insert_gp_rows(
+        connection,
+        table_name,
+        batch.columns,
+        rows,
+        gp_insert_chunk_size=gp_insert_chunk_size,
+        query_label=query_label,
+    )
+
+
+def _insert_gp_rows(
+    connection: Any,
+    table_name: str,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    gp_insert_chunk_size: int | None = None,
+    query_label: str | None = None,
+) -> None:
+    row_tuples = [tuple(row) for row in rows]
+    if not row_tuples:
+        return
+
+    sql = build_gp_batch_insert_sql(table_name, columns, query_label=query_label)
+    page_size = min(_get_gp_insert_chunk_size(gp_insert_chunk_size), len(row_tuples))
 
     cursor = connection.cursor()
     try:
-        execute_values(cursor, sql, rows, page_size=len(rows))
+        execute_values(cursor, sql, row_tuples, page_size=page_size)
         connection.commit()
     except Exception:
         connection.rollback()
@@ -117,18 +219,41 @@ def _insert_trino_batch(
     connection_type: str = "trino",
     query_label: str | None = None,
 ) -> None:
+    rows = list(batch.itertuples(index=False, name=None))
+    _insert_trino_rows(
+        connection,
+        table_name,
+        batch.columns,
+        rows,
+        target_column_types=target_column_types,
+        trino_insert_chunk_size=trino_insert_chunk_size,
+        connection_type=connection_type,
+        query_label=query_label,
+    )
+
+
+def _insert_trino_rows(
+    connection: Any,
+    table_name: str,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    target_column_types: dict[str, str] | None = None,
+    trino_insert_chunk_size: int | None = None,
+    connection_type: str = "trino",
+    query_label: str | None = None,
+) -> None:
     chunk_size = _get_trino_insert_chunk_size(
         trino_insert_chunk_size,
         connection_type,
     )
     cursor = connection.cursor()
     try:
-        row_iterator = _iter_trino_rows(batch, target_column_types)
+        row_iterator = _iter_trino_row_values(columns, rows, target_column_types)
         for row_chunk in _chunk_rows(row_iterator, chunk_size):
             params = [value for row in row_chunk for value in row]
             sql = build_trino_batch_insert_sql(
                 table_name,
-                batch.columns,
+                columns,
                 row_count=len(row_chunk),
                 query_label=query_label,
             )
@@ -177,10 +302,31 @@ def _insert_ch_batch(client: Any, table_name: str, batch: pd.DataFrame) -> None:
     )
 
 
+def _insert_ch_rows(
+    client: Any,
+    table_name: str,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    column_types: dict[str, str] | None,
+) -> None:
+    client.insert(
+        table=table_name,
+        data=[_normalize_ch_row(row) for row in rows],
+        column_names=list(columns),
+        column_type_names=_column_type_names(columns, column_types),
+    )
+
+
 _BATCH_INSERT_FUNCTION_NAMES = {
     "gp": "_insert_gp_batch",
     "trino": "_insert_trino_batch",
     "ch": "_insert_ch_batch",
+}
+
+_ROW_INSERT_FUNCTION_NAMES = {
+    "gp": "_insert_gp_rows",
+    "trino": "_insert_trino_rows",
+    "ch": "_insert_ch_rows",
 }
 
 
@@ -192,6 +338,7 @@ def _insert_batch_backend(
     *,
     target_column_types: dict[str, str] | None,
     trino_insert_chunk_size: int | None,
+    gp_insert_chunk_size: int | None,
     connection_type: str,
     query_label: str | None,
 ) -> None:
@@ -205,6 +352,7 @@ def _insert_batch_backend(
             connection,
             table_name,
             batch,
+            gp_insert_chunk_size=gp_insert_chunk_size,
             query_label=query_label,
         )
         return
@@ -222,12 +370,61 @@ def _insert_batch_backend(
     globals()[function_name](connection, table_name, batch)
 
 
+def _insert_rows_backend(
+    backend: str,
+    connection: Any,
+    table_name: str,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    *,
+    target_column_types: dict[str, str] | None,
+    trino_insert_chunk_size: int | None,
+    gp_insert_chunk_size: int | None,
+    connection_type: str,
+    query_label: str | None,
+) -> None:
+    function_name = _ROW_INSERT_FUNCTION_NAMES.get(backend)
+    if function_name is None:
+        raise UnsupportedConnectionTypeError(
+            "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
+        )
+    if backend == "gp":
+        globals()[function_name](
+            connection,
+            table_name,
+            columns,
+            rows,
+            gp_insert_chunk_size=gp_insert_chunk_size,
+            query_label=query_label,
+        )
+        return
+    if backend == "trino":
+        globals()[function_name](
+            connection,
+            table_name,
+            columns,
+            rows,
+            target_column_types=target_column_types,
+            trino_insert_chunk_size=trino_insert_chunk_size,
+            connection_type=connection_type,
+            query_label=query_label,
+        )
+        return
+    globals()[function_name](connection, table_name, columns, rows, target_column_types)
+
+
 def normalize_ch_batch(batch: pd.DataFrame) -> pd.DataFrame:
     normalized = batch.map(_normalize_ch_scalar)
     for column_name in normalized.columns:
         series = normalized[column_name]
         normalized[column_name] = series.astype(object).where(series.notna(), None)
     return normalized
+
+
+def _normalize_ch_row(row: Sequence[Any]) -> tuple[Any, ...]:
+    return tuple(
+        _normalize_ch_scalar(_normalize_nullable_scalar(value)) for value in row
+    )
 
 
 def _normalize_ch_scalar(value: object) -> object:
@@ -250,8 +447,17 @@ def _iter_trino_rows(
     target_column_types: dict[str, str] | None,
 ) -> Iterator[tuple[Any, ...]]:
     for row in batch.itertuples(index=False, name=None):
+        yield from _iter_trino_row_values(batch.columns, [row], target_column_types)
+
+
+def _iter_trino_row_values(
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    target_column_types: dict[str, str] | None,
+) -> Iterator[tuple[Any, ...]]:
+    for row in rows:
         normalized_values = []
-        for column_name, value in zip(batch.columns, row, strict=True):
+        for column_name, value in zip(columns, row, strict=True):
             target_type = (
                 target_column_types.get(column_name)
                 if target_column_types is not None
@@ -354,11 +560,39 @@ def _get_trino_insert_chunk_size(
     return DEFAULT_TRINO_INSERT_CHUNK_SIZE
 
 
+def _get_gp_insert_chunk_size(explicit_value: int | None) -> int:
+    if explicit_value is not None:
+        if explicit_value <= 0:
+            raise ValueError("gp_insert_chunk_size must be a positive integer.")
+        return explicit_value
+    return DEFAULT_GP_INSERT_CHUNK_SIZE
+
+
+def _column_type_names(
+    columns: Sequence[str],
+    column_types: dict[str, str] | None,
+) -> list[str] | None:
+    if column_types is None:
+        return None
+    try:
+        return [column_types[column_name] for column_name in columns]
+    except KeyError as exc:
+        raise ValueError(
+            f"Missing explicit SQL type for column {exc.args[0]!r}."
+        ) from exc
+
+
+def _normalize_nullable_scalar(value: Any) -> Any:
+    if _is_null_like(value):
+        return None
+    return value
+
+
 def _is_null_like(value: Any) -> bool:
     if value is None:
         return True
 
     try:
         return bool(pd.isna(value))
-    except TypeError:
+    except (TypeError, ValueError):
         return False

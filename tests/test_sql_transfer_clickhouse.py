@@ -103,6 +103,26 @@ class FakeClickHouseClient:
             }
         )
 
+    def insert(
+        self,
+        table: str,
+        data: list[tuple[Any, ...]],
+        column_names: list[str],
+        column_type_names: list[str] | None = None,
+    ) -> None:
+        self.inserts.append(
+            {
+                "table": table,
+                "data": list(data),
+                "column_names": list(column_names),
+                "column_type_names": (
+                    list(column_type_names)
+                    if column_type_names is not None
+                    else None
+                ),
+            }
+        )
+
     def close(self) -> None:
         self.close_calls += 1
 
@@ -155,6 +175,13 @@ def test_transfer_table_clickhouse_target_creates_distributed_table_on_cluster(
 
     assert transferred_rows == 1
     assert target.inserts[0]["table"].startswith("test_transfer_target__stage__")
+    assert target.inserts[0]["data"] == [(date(2024, 2, 1), 10)]
+    assert target.inserts[0]["column_names"] == ["month_date", "users"]
+    assert target.inserts[0]["column_type_names"] == [
+        "Nullable(Date)",
+        "Nullable(Int64)",
+    ]
+    assert "df" not in target.inserts[0]
 
     cluster_distributed_creates = [
         command

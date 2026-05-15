@@ -129,5 +129,25 @@ class FakeClickHouseClient:
             }
         )
 
+    def insert(
+        self,
+        table: str,
+        data: list[tuple[Any, ...]],
+        column_names: list[str],
+        column_type_names: list[str] | None = None,
+    ) -> None:
+        self.inserts.append(
+            {
+                "table": table,
+                "data": list(data),
+                "column_names": list(column_names),
+                "column_type_names": (
+                    list(column_type_names)
+                    if column_type_names is not None
+                    else None
+                ),
+            }
+        )
+
     def close(self) -> None:
         self.close_calls += 1

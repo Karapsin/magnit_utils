@@ -204,7 +204,13 @@ def _build_gp_create_table_sqls(
     gp_distributed_by_key: list[str] | None,
     **_: object,
 ) -> list[str]:
-    storage_sql = "WITH (appendoptimized = TRUE, compresstype = zstd, compresslevel = 2)"
+    storage_sql = (
+        "WITH (appendonly=true,\n"
+        "        blocksize=32768,\n"
+        "        compresstype=zstd,\n"
+        "        compresslevel=4,\n"
+        "        orientation=column)"
+    )
     if gp_distributed_by_key:
         distribution_sql = (
             f"DISTRIBUTED BY ({column_list_sql(gp_distributed_by_key, 'gp')})"

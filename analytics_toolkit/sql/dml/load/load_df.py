@@ -76,6 +76,7 @@ def load_df(
     return_sql: bool = False,
     return_metadata: bool = False,
     query_label: str | None = None,
+    gp_insert_chunk_size: int | None = None,
 ) -> int | SqlPlan | SqlOperationResult:
     if not isinstance(df, pd.DataFrame):
         raise TypeError("df must be a pandas DataFrame.")
@@ -98,6 +99,7 @@ def load_df(
         ch_cluster=ch_cluster,
         ch_sharding_key=sharding_key,
         query_label=query_label,
+        gp_insert_chunk_size=gp_insert_chunk_size,
     )
 
     if dry_run or return_sql:
@@ -193,6 +195,7 @@ def _build_load_options(
     ch_cluster: str = "{cluster}",
     ch_sharding_key: str = "rand()",
     query_label: str | None = None,
+    gp_insert_chunk_size: int | None = None,
 ) -> LoadOptions:
     config = get_connection_config(connection_type)
     configured_trino_insert_chunk_size = (
@@ -225,6 +228,7 @@ def _build_load_options(
         ch_cluster=normalize_ch_string(ch_cluster, "ch_cluster"),
         ch_sharding_key=normalize_ch_string(ch_sharding_key, "sharding_key"),
         query_label=query_label,
+        gp_insert_chunk_size=gp_insert_chunk_size,
     )
 
     if not options.destination_table:
@@ -233,6 +237,13 @@ def _build_load_options(
         raise ValueError(
             "gp_distributed_by_key can only be used when connection_type has type 'gp'."
         )
+    if options.gp_insert_chunk_size is not None:
+        if options.connection_backend != "gp":
+            raise ValueError(
+                "gp_insert_chunk_size can only be used when connection_type has type 'gp'."
+            )
+        if options.gp_insert_chunk_size <= 0:
+            raise ValueError("gp_insert_chunk_size must be a positive integer.")
     if options.trino_insert_chunk_size is not None and options.trino_insert_chunk_size <= 0:
         raise ValueError("trino_insert_chunk_size must be a positive integer.")
     validate_ch_options_not_used(
@@ -476,6 +487,7 @@ def build_load_df_plan(options: LoadOptions, df: pd.DataFrame) -> SqlPlan:
             "key_columns": options.key_columns,
             "gp_distributed_by_key": options.gp_distributed_by_key,
             "trino_insert_chunk_size": options.trino_insert_chunk_size,
+            "gp_insert_chunk_size": options.gp_insert_chunk_size,
             "ch_partition_by": options.ch_partition_by,
             "ch_order_by": options.ch_order_by,
             "ch_engine": options.ch_engine,
@@ -668,6 +680,7 @@ def _load_dataframe(
             timeout_increment=0,
             target_column_types=state.target_column_types,
             trino_insert_chunk_size=options.trino_insert_chunk_size,
+            gp_insert_chunk_size=options.gp_insert_chunk_size,
             query_label=options.query_label,
         )
         validate_stage_target_key_overlap(
@@ -698,6 +711,7 @@ def _load_dataframe(
         timeout_increment=0,
         target_column_types=state.target_column_types,
         trino_insert_chunk_size=options.trino_insert_chunk_size,
+        gp_insert_chunk_size=options.gp_insert_chunk_size,
         query_label=options.query_label,
     )
 

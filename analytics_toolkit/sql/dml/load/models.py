@@ -13,6 +13,7 @@ class LoadOptions:
     gp_distributed_by_key: list[str] | None = None
     key_columns: list[str] | None = None
     trino_insert_chunk_size: int | None = None
+    gp_insert_chunk_size: int | None = None
     ch_partition_by: list[str] | str | None = None
     ch_order_by: list[str] | str | None = None
     ch_engine: str = "ReplicatedMergeTree"

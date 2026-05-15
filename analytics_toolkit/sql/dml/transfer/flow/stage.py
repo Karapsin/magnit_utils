@@ -1,10 +1,13 @@
-import pandas as pd
-
 from ....ch_options import validate_ch_columns_in_columns
 from ...load.stage import create_stage_table
 from ...table.table_ops import get_trino_table_column_types, table_exists
 from ...table.table_validation import validate_key_columns_in_columns
-from ..runtime.models import TransferConnectionRefs, TransferOptions, TransferStageState
+from ..runtime.models import (
+    RowBatch,
+    TransferConnectionRefs,
+    TransferOptions,
+    TransferStageState,
+)
 
 
 def create_stage_state(
@@ -25,26 +28,29 @@ def initialize_stage_for_first_batch(
     options: TransferOptions,
     connection_refs: TransferConnectionRefs,
     stage_state: TransferStageState,
-    batch: pd.DataFrame,
+    batch: RowBatch,
 ) -> None:
-    stage_state.first_non_empty_batch = batch.copy()
+    sample_batch = batch.to_dataframe(
+        include_rows=stage_state.stage_column_types is None,
+    )
+    stage_state.first_non_empty_batch = sample_batch
     validate_key_columns_in_columns(
         options.key_columns,
-        stage_state.first_non_empty_batch.columns,
+        batch.columns,
     )
     validate_key_columns_in_columns(
         options.gp_distributed_by_key,
-        stage_state.first_non_empty_batch.columns,
+        batch.columns,
     )
     validate_ch_columns_in_columns(
         options.ch_partition_by,
-        stage_state.first_non_empty_batch.columns,
+        batch.columns,
         "ch_partition_by",
         data_name="staged data",
     )
     validate_ch_columns_in_columns(
         options.ch_order_by,
-        stage_state.first_non_empty_batch.columns,
+        batch.columns,
         "ch_order_by",
         data_name="staged data",
     )
@@ -52,7 +58,7 @@ def initialize_stage_for_first_batch(
         connection_type=options.to_db_backend,
         connection=connection_refs.target["connection"],
         target_table=options.target_table,
-        batch=batch,
+        batch=sample_batch,
         column_types=stage_state.stage_column_types,
         gp_distributed_by_key=options.gp_distributed_by_key,
         connection_key=options.to_db_key,

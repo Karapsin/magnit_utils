@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from ....connection.get_sql_connection import get_sql_connection
 from analytics_toolkit.general import time_print
-from ...load.load_sql_table import insert_table_batch
+from ...load.load_sql_table import insert_rows_batch
 from .finalize import cleanup_stage, finalize_loaded_stage
-from ..runtime.models import TransferConnectionRefs, TransferOptions, TransferStageState
+from ..runtime.models import (
+    AdaptiveBatchSizer,
+    TransferConnectionRefs,
+    TransferOptions,
+    TransferStageState,
+)
 from ..runtime.retry import close_connection_ref, run_with_retry
 from ..io.source import iter_source_batches
 from ..schema import inspect_source_query_schema, map_source_schema_to_target
@@ -87,6 +92,13 @@ def load_stage_batches(
     insert_retry_cnt: int,
 ) -> int:
     total_rows = 0
+    batch_sizer = AdaptiveBatchSizer(
+        enabled=options.adaptive_batch_size,
+        current_size=options.batch_size,
+        min_size=options.min_batch_size,
+        max_size=options.max_batch_size,
+        target_seconds=options.target_batch_seconds,
+    )
     for batch in iter_source_batches(
         options.from_db_key,
         options.from_db_backend,
@@ -96,6 +108,7 @@ def load_stage_batches(
         retry_cnt=read_retry_cnt,
         timeout_increment=options.timeout_increment,
         query_label=options.query_label,
+        get_batch_size=lambda: batch_sizer.current_size,
     ):
         if batch.empty:
             continue
@@ -108,17 +121,19 @@ def load_stage_batches(
                 batch=batch,
             )
 
-        inserted_rows = insert_table_batch(
+        inserted_rows = insert_rows_batch(
             options.to_db_backend,
             connection_refs.target,
             stage_state.stage_table,
-            batch,
+            batch.columns,
+            batch.rows,
             retry_fn=run_with_retry,
             retry_cnt=insert_retry_cnt,
             timeout_increment=options.timeout_increment,
             target_column_types=stage_state.stage_column_types,
             trino_insert_chunk_size=options.trino_insert_chunk_size,
             query_label=options.query_label,
+            on_success=batch_sizer.update,
         )
         total_rows += inserted_rows
         time_print(

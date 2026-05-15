@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pandas as pd
@@ -8,6 +8,7 @@ import pandas as pd
 from ....connection.errors import UnsupportedConnectionTypeError
 from ....labels import apply_query_label
 from analytics_toolkit.general import time_print
+from ..runtime.models import RowBatch
 from ..runtime.retry import replace_connection, rollback_quietly, run_with_retry
 
 
@@ -20,15 +21,17 @@ def iter_source_batches(
     retry_cnt: int,
     timeout_increment: int | float,
     query_label: str | None = None,
-) -> Iterator[pd.DataFrame]:
+    get_batch_size: Callable[[], int] | None = None,
+) -> Iterator[RowBatch]:
     labeled_query = apply_query_label(query, query_label)
+    batch_size_getter = get_batch_size or (lambda: batch_size)
     if connection_backend in {"gp", "trino"}:
         yield from _iter_dbapi_batches(
             connection_key,
             connection_backend,
             connection_ref,
             labeled_query,
-            batch_size,
+            batch_size_getter,
             retry_cnt=retry_cnt,
             timeout_increment=timeout_increment,
         )
@@ -38,7 +41,7 @@ def iter_source_batches(
             connection_key,
             connection_ref,
             labeled_query,
-            batch_size,
+            batch_size_getter,
             retry_cnt=retry_cnt,
             timeout_increment=timeout_increment,
         )
@@ -54,10 +57,10 @@ def _iter_dbapi_batches(
     connection_backend: str,
     connection_ref: dict[str, Any],
     query: str,
-    batch_size: int,
+    get_batch_size: Callable[[], int],
     retry_cnt: int,
     timeout_increment: int | float,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[RowBatch]:
     cursor, columns = _start_dbapi_query_with_retry(
         connection_key,
         connection_backend,
@@ -68,10 +71,10 @@ def _iter_dbapi_batches(
     )
     try:
         while True:
-            rows = cursor.fetchmany(batch_size)
+            rows = cursor.fetchmany(get_batch_size())
             if not rows:
                 break
-            yield pd.DataFrame(rows, columns=columns)
+            yield RowBatch(columns=columns, rows=_rows_as_tuples(rows))
     except Exception:
         time_print(f"SQL failed while reading transfer source:\n{query}")
         raise
@@ -83,10 +86,10 @@ def _iter_clickhouse_batches(
     connection_key: str,
     connection_ref: dict[str, Any],
     query: str,
-    batch_size: int,
+    get_batch_size: Callable[[], int],
     retry_cnt: int,
     timeout_increment: int | float,
-) -> Iterator[pd.DataFrame]:
+) -> Iterator[RowBatch]:
     context_manager: Any | None = None
     stream_iterator: Iterator[pd.DataFrame] | None = None
     first_block: pd.DataFrame | None = None
@@ -100,31 +103,32 @@ def _iter_clickhouse_batches(
             timeout_increment=timeout_increment,
         )
 
-        pending_frames: list[pd.DataFrame] = []
-        pending_rows = 0
+        columns: list[str] | None = None
+        pending_rows: list[tuple[Any, ...]] = []
 
         if first_block is not None and not first_block.empty:
-            pending_frames.append(first_block)
-            pending_rows += len(first_block)
+            columns = list(first_block.columns)
+            pending_rows.extend(_dataframe_rows_as_tuples(first_block))
 
         if stream_iterator is not None:
             for block in stream_iterator:
                 if block.empty:
                     continue
 
-                pending_frames.append(block)
-                pending_rows += len(block)
+                if columns is None:
+                    columns = list(block.columns)
+                pending_rows.extend(_dataframe_rows_as_tuples(block))
 
-                while pending_rows >= batch_size:
-                    combined = pd.concat(pending_frames, ignore_index=True)
-                    yield combined.iloc[:batch_size].reset_index(drop=True)
+                while True:
+                    current_batch_size = get_batch_size()
+                    if len(pending_rows) < current_batch_size:
+                        break
+                    batch_rows = pending_rows[:current_batch_size]
+                    pending_rows = pending_rows[current_batch_size:]
+                    yield RowBatch(columns=columns, rows=batch_rows)
 
-                    remainder = combined.iloc[batch_size:].reset_index(drop=True)
-                    pending_frames = [remainder] if not remainder.empty else []
-                    pending_rows = len(remainder)
-
-        if pending_rows > 0:
-            yield pd.concat(pending_frames, ignore_index=True)
+        if pending_rows and columns is not None:
+            yield RowBatch(columns=columns, rows=pending_rows)
     except Exception:
         time_print(f"SQL failed while reading transfer source:\n{query}")
         raise
@@ -193,3 +197,11 @@ def _start_clickhouse_stream_with_retry(
         timeout_increment=timeout_increment,
         operation=operation,
     )
+
+
+def _rows_as_tuples(rows: list[Any]) -> list[tuple[Any, ...]]:
+    return [tuple(row) for row in rows]
+
+
+def _dataframe_rows_as_tuples(block: pd.DataFrame) -> list[tuple[Any, ...]]:
+    return list(block.itertuples(index=False, name=None))

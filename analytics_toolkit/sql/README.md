@@ -27,7 +27,7 @@ sql.create_sql_table(...)
 sql.ch_create_table_as(...)
 sql.create_table_from_sql(...)
 sql.load_df(..., retry_cnt=5, timeout_increment=5)
-sql.transfer(..., trino_insert_chunk_size=1000)
+sql.transfer(..., batch_size=100_000, adaptive_batch_size=True)
 sql.ch_full_table_move(...)
 sql.get_sql_connection(...)
 ```
@@ -225,6 +225,24 @@ For Trino targets, `load_df` and `transfer_table` also accept
 `trino_insert_chunk_size` to control how many rows are sent in each
 parameterized multi-row insert statement. If omitted, the package falls back to
 the target Trino connection's `insert_chunk_size`, then to the internal default.
+
+For Greenplum targets, `load_df` accepts `gp_insert_chunk_size` to control the
+`execute_values` page size for DataFrame inserts. The default is 10,000 rows per
+statement so large DataFrames do not become one oversized `VALUES` statement;
+lower it for very wide rows or tight VMEM quotas.
+
+`transfer_table` streams source results as row batches. `batch_size` is the
+initial fetch/insert size. By default `adaptive_batch_size=True` adjusts later
+batches from successful insert latency: faster than half of
+`target_batch_seconds` grows by 50%, slower than twice the target shrinks by
+50%. `min_batch_size` and `max_batch_size` bound the adaptive size; when
+`max_batch_size` is omitted it defaults to `batch_size * 4`.
+
+Greenplum tables created by `create_sql_table`, `load_df`, `transfer_table`,
+and `create_table_from_sql` default to append-only column-oriented storage:
+`WITH (appendonly=true, blocksize=32768, compresstype=zstd, compresslevel=4,
+orientation=column)`. Pass `gp_distributed_by_key` to use `DISTRIBUTED BY`;
+otherwise created Greenplum tables use `DISTRIBUTED RANDOMLY`.
 
 ## Opt-In Write Controls
 

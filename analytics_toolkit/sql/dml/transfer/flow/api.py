@@ -44,6 +44,10 @@ def transfer_table(
     replace_target_table: bool = True,
     write_mode: str | None = None,
     batch_size: int = 100_000,
+    adaptive_batch_size: bool = True,
+    min_batch_size: int = 1_000,
+    max_batch_size: int | None = None,
+    target_batch_seconds: float = 10.0,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
     full_retry_cnt: int = 5,
@@ -69,6 +73,10 @@ def transfer_table(
         replace_target_table=replace_target_table,
         write_mode=write_mode,
         batch_size=batch_size,
+        adaptive_batch_size=adaptive_batch_size,
+        min_batch_size=min_batch_size,
+        max_batch_size=max_batch_size,
+        target_batch_seconds=target_batch_seconds,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
         full_retry_cnt=full_retry_cnt,
@@ -182,6 +190,10 @@ def build_transfer_options(
     replace_target_table: bool = True,
     write_mode: str | None = None,
     batch_size: int = 100_000,
+    adaptive_batch_size: bool = True,
+    min_batch_size: int = 1_000,
+    max_batch_size: int | None = None,
+    target_batch_seconds: float = 10.0,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
     full_retry_cnt: int = 5,
@@ -206,6 +218,17 @@ def build_transfer_options(
         replace_target_table=replace_target_table,
         write_mode=write_mode,
     )
+    (
+        resolved_min_batch_size,
+        resolved_max_batch_size,
+        resolved_target_batch_seconds,
+    ) = _resolve_adaptive_batch_bounds(
+        batch_size=batch_size,
+        min_batch_size=min_batch_size,
+        max_batch_size=max_batch_size,
+        target_batch_seconds=target_batch_seconds,
+        adaptive_batch_size=adaptive_batch_size,
+    )
     options = TransferOptions(
         from_db_key=from_config.connection_key,
         from_db_backend=from_config.backend,
@@ -216,6 +239,10 @@ def build_transfer_options(
         replace_target_table=resolved_write_mode != "append",
         write_mode=resolved_write_mode,
         batch_size=batch_size,
+        adaptive_batch_size=adaptive_batch_size,
+        min_batch_size=resolved_min_batch_size,
+        max_batch_size=resolved_max_batch_size,
+        target_batch_seconds=resolved_target_batch_seconds,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
         full_retry_cnt=full_retry_cnt,
@@ -272,6 +299,49 @@ def build_transfer_options(
     return options
 
 
+def _resolve_adaptive_batch_bounds(
+    *,
+    batch_size: int,
+    min_batch_size: int,
+    max_batch_size: int | None,
+    target_batch_seconds: float,
+    adaptive_batch_size: bool,
+) -> tuple[int, int, float]:
+    if not isinstance(adaptive_batch_size, bool):
+        raise ValueError("adaptive_batch_size must be a boolean.")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer.")
+    if min_batch_size <= 0:
+        raise ValueError("min_batch_size must be a positive integer.")
+    if max_batch_size is not None and max_batch_size <= 0:
+        raise ValueError("max_batch_size must be a positive integer.")
+    try:
+        resolved_target_batch_seconds = float(target_batch_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("target_batch_seconds must be positive.") from exc
+    if resolved_target_batch_seconds <= 0:
+        raise ValueError("target_batch_seconds must be positive.")
+
+    resolved_min_batch_size = min_batch_size
+    if resolved_min_batch_size > batch_size and min_batch_size == 1_000:
+        resolved_min_batch_size = batch_size
+
+    resolved_max_batch_size = (
+        batch_size * 4 if max_batch_size is None else max_batch_size
+    )
+    if resolved_min_batch_size > batch_size:
+        raise ValueError("min_batch_size must be less than or equal to batch_size.")
+    if batch_size > resolved_max_batch_size:
+        raise ValueError("max_batch_size must be greater than or equal to batch_size.")
+    if resolved_min_batch_size > resolved_max_batch_size:
+        raise ValueError("min_batch_size must be less than or equal to max_batch_size.")
+    return (
+        resolved_min_batch_size,
+        resolved_max_batch_size,
+        resolved_target_batch_seconds,
+    )
+
+
 def _resolve_transfer_write_mode(
     to_db_backend: str,
     *,
@@ -302,6 +372,10 @@ def build_transfer_table_plan(options: TransferOptions) -> SqlPlan:
         options={
             "write_mode": options.write_mode,
             "batch_size": options.batch_size,
+            "adaptive_batch_size": options.adaptive_batch_size,
+            "min_batch_size": options.min_batch_size,
+            "max_batch_size": options.max_batch_size,
+            "target_batch_seconds": options.target_batch_seconds,
             "key_columns": options.key_columns,
             "gp_distributed_by_key": options.gp_distributed_by_key,
             "trino_insert_chunk_size": options.trino_insert_chunk_size,
