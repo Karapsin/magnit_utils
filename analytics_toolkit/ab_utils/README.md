@@ -6,6 +6,7 @@ Helpers for AB-test related workflows.
 
 - `compute_test_metrics`: compare experiment groups across all metric columns in a dataframe
 - `parallel_compute_metrics`: run named `compute_test_metrics` tasks concurrently
+- `parallel_compute_metrics_from_sql`: load named SQL-backed tasks, then run metric computation concurrently
 
 ## Notes
 
@@ -90,6 +91,29 @@ result = parallel_compute_metrics(
             "test_vs_test": False,
         },
     },
+    concurrency=2,
+)
+```
+
+Load each task dataframe from the same SQL connection alias with
+`parallel_compute_metrics_from_sql`:
+
+```python
+result = parallel_compute_metrics_from_sql(
+    {
+        "segment_1": {
+            "sql": "select * from mart.ab_segment_1",
+            "pre_exp_sql": "select * from mart.ab_segment_1_pre",
+            "labels": {"segment": "segment1"},
+            "test_vs_test": False,
+        },
+        "segment_2": {
+            "sql": "select * from mart.ab_segment_2",
+            "labels": {"segment": "segment2"},
+            "test_vs_test": False,
+        },
+    },
+    db="analytics_prod",
     concurrency=2,
 )
 ```

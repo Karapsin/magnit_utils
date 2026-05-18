@@ -18,6 +18,17 @@ def test_parallel_compute_metrics_is_exported() -> None:
     assert metrics_module.parallel_compute_metrics is parallel_module.parallel_compute_metrics
 
 
+def test_parallel_compute_metrics_from_sql_is_exported() -> None:
+    assert (
+        ab_utils_module.parallel_compute_metrics_from_sql
+        is parallel_module.parallel_compute_metrics_from_sql
+    )
+    assert (
+        metrics_module.parallel_compute_metrics_from_sql
+        is parallel_module.parallel_compute_metrics_from_sql
+    )
+
+
 def test_parallel_compute_metrics_runs_tasks_and_preserves_input_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -365,5 +376,216 @@ def test_parallel_compute_metrics_rejects_ambiguous_pre_exp_aliases() -> None:
                     "pre_exp_metrics_df": pd.DataFrame(),
                 }
             },
+            progress=False,
+        )
+
+
+def test_parallel_compute_metrics_from_sql_loads_sql_and_delegates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_df = pd.DataFrame({"user_id": [1]})
+    pre_exp_df = pd.DataFrame({"user_id": [1], "orders": [3]})
+    second_df = pd.DataFrame({"user_id": [2]})
+    async_calls: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+    compute_calls: list[tuple[dict[str, dict[str, Any]], dict[str, Any]]] = []
+
+    def fake_async_sql(
+        tasks: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, pd.DataFrame]:
+        async_calls.append((tasks, kwargs))
+        return {
+            "with_pre:sql": experiment_df,
+            "with_pre:pre_exp_sql": pre_exp_df,
+            "without_pre:sql": second_df,
+        }
+
+    def fake_parallel_compute_metrics(
+        tasks: dict[str, dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, pd.DataFrame]:
+        compute_calls.append((tasks, kwargs))
+        return {
+            "with_pre": pd.DataFrame({"task": ["with_pre"]}),
+            "without_pre": pd.DataFrame({"task": ["without_pre"]}),
+        }
+
+    monkeypatch.setattr(parallel_module, "async_sql", fake_async_sql)
+    monkeypatch.setattr(
+        parallel_module,
+        "parallel_compute_metrics",
+        fake_parallel_compute_metrics,
+    )
+
+    result = parallel_module.parallel_compute_metrics_from_sql(
+        {
+            "with_pre": {
+                "sql": "select * from experiment_1",
+                "pre_exp_sql": "select * from pre_experiment_1",
+                "labels": {"segment": "segment1"},
+                "test_vs_test": False,
+                "bootstrap_progress": False,
+            },
+            "without_pre": {
+                "sql": "select * from experiment_2",
+                "labels": {"segment": "segment2"},
+                "multiple_comparisons_adjustment": True,
+            },
+        },
+        db="analytics_prod",
+        concurrency=2,
+        fail_fast=False,
+        progress=False,
+    )
+
+    assert list(result) == ["with_pre", "without_pre"]
+    pd.testing.assert_frame_equal(
+        result["with_pre"],
+        pd.DataFrame({"task": ["with_pre"]}),
+    )
+    pd.testing.assert_frame_equal(
+        result["without_pre"],
+        pd.DataFrame({"task": ["without_pre"]}),
+    )
+
+    assert len(async_calls) == 1
+    sql_tasks, sql_kwargs = async_calls[0]
+    assert sql_kwargs == {"concurrency": 2, "fail_fast": False, "progress": False}
+    assert sql_tasks == [
+        {
+            "name": "with_pre:sql",
+            "type": "read",
+            "connection_type": "analytics_prod",
+            "query": "select * from experiment_1",
+        },
+        {
+            "name": "with_pre:pre_exp_sql",
+            "type": "read",
+            "connection_type": "analytics_prod",
+            "query": "select * from pre_experiment_1",
+        },
+        {
+            "name": "without_pre:sql",
+            "type": "read",
+            "connection_type": "analytics_prod",
+            "query": "select * from experiment_2",
+        },
+    ]
+
+    assert len(compute_calls) == 1
+    metric_tasks, metric_kwargs = compute_calls[0]
+    assert metric_kwargs == {"concurrency": 2, "fail_fast": False, "progress": False}
+    assert list(metric_tasks) == ["with_pre", "without_pre"]
+
+    with_pre = dict(metric_tasks["with_pre"])
+    assert with_pre.pop("df") is experiment_df
+    assert with_pre.pop("pre_exp_df") is pre_exp_df
+    assert with_pre == {
+        "labels": {"segment": "segment1"},
+        "test_vs_test": False,
+        "bootstrap_progress": False,
+    }
+
+    without_pre = dict(metric_tasks["without_pre"])
+    assert without_pre.pop("df") is second_df
+    assert without_pre == {
+        "labels": {"segment": "segment2"},
+        "multiple_comparisons_adjustment": True,
+    }
+
+
+def test_parallel_compute_metrics_from_sql_fail_fast_false_returns_sql_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ok_df = pd.DataFrame({"user_id": [1]})
+    skipped_df = pd.DataFrame({"user_id": [2]})
+    computed = pd.DataFrame({"metric_name": ["orders"]})
+    compute_calls: list[dict[str, dict[str, Any]]] = []
+
+    def fake_async_sql(
+        tasks: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, pd.DataFrame | str]:
+        assert kwargs["fail_fast"] is False
+        return {
+            "ok:sql": ok_df,
+            "broken:sql": "database failed",
+            "pre_broken:sql": skipped_df,
+            "pre_broken:pre_exp_sql": "pre query failed",
+        }
+
+    def fake_parallel_compute_metrics(
+        tasks: dict[str, dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, pd.DataFrame]:
+        compute_calls.append(tasks)
+        return {"ok": computed}
+
+    monkeypatch.setattr(parallel_module, "async_sql", fake_async_sql)
+    monkeypatch.setattr(
+        parallel_module,
+        "parallel_compute_metrics",
+        fake_parallel_compute_metrics,
+    )
+
+    result = parallel_module.parallel_compute_metrics_from_sql(
+        {
+            "ok": {"sql": "select * from ok"},
+            "broken": {"sql": "select * from broken"},
+            "pre_broken": {
+                "sql": "select * from pre_broken",
+                "pre_exp_sql": "select * from pre_exp",
+            },
+        },
+        db="analytics_prod",
+        fail_fast=False,
+        progress=False,
+    )
+
+    assert list(result) == ["ok", "broken", "pre_broken"]
+    pd.testing.assert_frame_equal(result["ok"], computed)
+    assert result["broken"] == "database failed"
+    assert result["pre_broken"] == "pre query failed"
+    assert len(compute_calls) == 1
+    assert list(compute_calls[0]) == ["ok"]
+    assert compute_calls[0]["ok"]["df"] is ok_df
+
+
+@pytest.mark.parametrize(
+    ("tasks", "expected_exception"),
+    [
+        ({}, ValueError),
+        ([], TypeError),
+        ({1: {"sql": "select 1"}}, ValueError),
+        ({"": {"sql": "select 1"}}, ValueError),
+        ({"task": "not a mapping"}, TypeError),
+        ({"task": {}}, ValueError),
+        ({"task": {"sql": ""}}, ValueError),
+        ({"task": {"sql": "select 1", "pre_exp_sql": ""}}, ValueError),
+    ],
+)
+def test_parallel_compute_metrics_from_sql_validates_task_input(
+    tasks: Any,
+    expected_exception: type[Exception],
+) -> None:
+    with pytest.raises(expected_exception):
+        parallel_module.parallel_compute_metrics_from_sql(
+            tasks,
+            db="analytics_prod",
+            progress=False,
+        )
+
+
+@pytest.mark.parametrize("field", ["df", "pre_exp_df", "pre_exp_metrics_df"])
+def test_parallel_compute_metrics_from_sql_rejects_dataframe_inputs(field: str) -> None:
+    with pytest.raises(ValueError, match="SQL-backed"):
+        parallel_module.parallel_compute_metrics_from_sql(
+            {
+                "task": {
+                    "sql": "select 1",
+                    field: pd.DataFrame(),
+                }
+            },
+            db="analytics_prod",
             progress=False,
         )

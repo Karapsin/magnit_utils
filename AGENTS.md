@@ -39,10 +39,12 @@ Do not run tests against real databases. Unit tests should use fake connections,
 ## General Rules
 
 - Prefer small, local changes that follow existing module patterns.
-- Do not bump package versions, alter packaging metadata, or rewrite README/manual docs unless the task requires it.
+- Do not alter packaging metadata or rewrite README/manual docs unless the task requires it.
+- After every repository change, bump the package version in `pyproject.toml`. Versions use four parts: `0.x.y.z`. For a small fix to an existing function, increment only `z`, for example `0.8.1.0` -> `0.8.1.1`. For a new function or a significant improvement to an existing function, such as a progress bar or a new input type, increment `y` and reset `z` to 0, for example `0.8.1.1` -> `0.8.2.0`. If this would make `y` greater than 9, increment `x` instead and reset `y` and `z` to 0, for example `0.8.9.3` -> `0.9.0.0`. In general `x.y.z.a` notation, when the second component is greater than 9, set the first component to `x + 1` before applying the applicable bump rule.
 - When changing public behavior, update the relevant module README and focused tests.
 - Keep `.connections` out of the repo. Tests should create a temporary `.connections` and chdir into that temp project.
 - Use existing structured parsers for SQL/table names (`sqlparse`, `sqlglot`) instead of ad hoc parsing where those modules already do the job.
+- Once a coherent batch of changes is done, run `git add . && git commit -m '...'`, replacing `...` with a short description of the changes.
 
 ## SQL Module Contracts
 
