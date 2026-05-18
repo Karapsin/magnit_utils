@@ -147,6 +147,241 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
     }
 
 
+def test_async_sql_start_comment_prefixes_sql_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, dict[str, Any]] = {}
+
+    def record(task_type: str, result_field: str | None):
+        def fake_operation(**kwargs: Any) -> Any:
+            calls[task_type] = kwargs
+            if result_field is None:
+                return None
+            return kwargs[result_field]
+
+        return fake_operation
+
+    monkeypatch.setattr(async_module, "read_sql", record("read", "query"))
+    monkeypatch.setattr(async_module, "execute_sql", record("execute", None))
+    monkeypatch.setattr(
+        async_module,
+        "execute_read",
+        record("execute_read", "query"),
+    )
+    monkeypatch.setattr(
+        async_module,
+        "transfer_table",
+        record("transfer", "from_sql"),
+    )
+
+    result = async_module.async_sql(
+        named_tasks(
+            {
+                "read_users": {
+                    "type": "read",
+                    "connection_type": "gp",
+                    "query": "select * from users",
+                },
+                "refresh_table": {
+                    "type": "execute",
+                    "connection_type": "gp",
+                    "query": "truncate table sandbox.target",
+                },
+                "prepare_and_read": {
+                    "type": "execute_read",
+                    "connection_type": "trino",
+                    "query": "create table tmp as select 1; select * from tmp",
+                },
+                "copy_table": {
+                    "type": "transfer",
+                    "from_db": "gp",
+                    "to_db": "trino",
+                    "from_sql": "select * from source",
+                    "to_table": "sandbox.copy",
+                },
+            }
+        ),
+        concurrency=1,
+        start_comment="/* async batch */  \n",
+        progress=False,
+    )
+
+    assert result["read_users"] == "/* async batch */\nselect * from users"
+    assert result["refresh_table"] == "success"
+    assert (
+        result["prepare_and_read"]
+        == "/* async batch */\ncreate table tmp as select 1; select * from tmp"
+    )
+    assert result["copy_table"] == "/* async batch */\nselect * from source"
+    assert calls["read"]["query"] == "/* async batch */\nselect * from users"
+    assert calls["execute"]["query"] == "/* async batch */\ntruncate table sandbox.target"
+    assert (
+        calls["execute_read"]["query"]
+        == "/* async batch */\ncreate table tmp as select 1; select * from tmp"
+    )
+    assert calls["transfer"]["from_sql"] == "/* async batch */\nselect * from source"
+
+
+def test_async_sql_task_start_comment_overrides_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_read_sql(**kwargs: Any) -> str:
+        return kwargs["query"]
+
+    monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
+
+    result = async_module.async_sql(
+        named_tasks(
+            {
+                "default": {
+                    "type": "read",
+                    "connection_type": "gp",
+                    "query": "select default",
+                },
+                "override": {
+                    "type": "read",
+                    "connection_type": "gp",
+                    "query": "select override",
+                    "start_comment": "  -- task override  ",
+                },
+                "blank": {
+                    "type": "read",
+                    "connection_type": "gp",
+                    "query": "select blank",
+                    "start_comment": "   ",
+                },
+                "none": {
+                    "type": "read",
+                    "connection_type": "gp",
+                    "query": "select none",
+                    "start_comment": None,
+                },
+            }
+        ),
+        concurrency=1,
+        start_comment="-- default",
+        progress=False,
+    )
+
+    assert result == {
+        "default": "-- default\nselect default",
+        "override": "  -- task override\nselect override",
+        "blank": "select blank",
+        "none": "select none",
+    }
+
+
+@pytest.mark.parametrize("start_comment", [None, "   "])
+def test_async_sql_blank_and_none_start_comment_are_noops(
+    monkeypatch: pytest.MonkeyPatch,
+    start_comment: str | None,
+) -> None:
+    def fake_read_sql(**kwargs: Any) -> str:
+        return kwargs["query"]
+
+    monkeypatch.setattr(async_module, "read_sql", fake_read_sql)
+
+    result = async_module.async_sql(
+        [
+            {
+                "type": "read",
+                "connection_type": "gp",
+                "query": "select 1",
+            }
+        ],
+        start_comment=start_comment,
+        progress=False,
+    )
+
+    assert result == {"task_0": "select 1"}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"start_comment": 1},
+        {"start_comment": True},
+    ],
+)
+def test_async_sql_rejects_non_string_top_level_start_comment(
+    kwargs: dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError, match="start_comment"):
+        async_module.async_sql(
+            [
+                {
+                    "type": "read",
+                    "connection_type": "gp",
+                    "query": "select 1",
+                }
+            ],
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize("start_comment", [1, True])
+def test_async_sql_rejects_non_string_task_start_comment(
+    start_comment: Any,
+) -> None:
+    with pytest.raises(ValueError, match="start_comment"):
+        async_module.async_sql(
+            [
+                {
+                    "type": "read",
+                    "connection_type": "gp",
+                    "query": "select 1",
+                    "start_comment": start_comment,
+                }
+            ]
+        )
+
+
+def test_async_sql_start_comment_does_not_change_load_df_or_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load_calls: list[dict[str, Any]] = []
+
+    def fake_load_df(**kwargs: Any) -> int:
+        load_calls.append(kwargs)
+        return 1
+
+    def pipeline_step(context: Any) -> str:
+        return context.task_name
+
+    monkeypatch.setattr(async_module, "load_df", fake_load_df)
+
+    df = pd.DataFrame({"id": [1]})
+    result = async_module.async_sql(
+        named_tasks(
+            {
+                "load_batch": {
+                    "type": "load_df",
+                    "connection_type": "ch",
+                    "destination_table": "sandbox.batch",
+                    "df": df,
+                    "start_comment": "-- ignored",
+                },
+                "pipeline": {
+                    "type": "custom_sql_pipeline",
+                    "steps": [pipeline_step],
+                },
+            }
+        ),
+        concurrency=1,
+        start_comment="-- default",
+        progress=False,
+    )
+
+    assert result == {"load_batch": 1, "pipeline": "pipeline"}
+    assert len(load_calls) == 1
+    load_kwargs = load_calls[0]
+    assert load_kwargs["df"] is df
+    assert {key: value for key, value in load_kwargs.items() if key != "df"} == {
+        "connection_type": "ch",
+        "destination_table": "sandbox.batch",
+    }
+
+
 def test_async_sql_uses_generated_names_for_unnamed_task_sequence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -719,6 +954,18 @@ def test_async_sql_validates_pipeline_extra_fields() -> None:
                     "type": "custom_sql_pipeline",
                     "steps": [lambda context: None],
                     "connection_type": "gp",
+                }
+            ]
+        )
+
+    with pytest.raises(ValueError, match="unsupported custom_sql_pipeline field"):
+        async_module.async_sql(
+            [
+                {
+                    "name": "pipeline",
+                    "type": "custom_sql_pipeline",
+                    "steps": [lambda context: None],
+                    "start_comment": "-- unsupported",
                 }
             ]
         )

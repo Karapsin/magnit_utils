@@ -54,6 +54,7 @@ def async_sql(
     *,
     concurrency: int = 5,
     fail_fast: bool = True,
+    start_comment: str | None = None,
     soft_concurrency_cap: int | None = None,
     hard_concurrency_cap: int = _DEFAULT_HARD_CONCURRENCY_CAP,
     progress: bool = True,
@@ -64,6 +65,7 @@ def async_sql(
             tasks,
             concurrency=concurrency,
             fail_fast=fail_fast,
+            start_comment=start_comment,
             soft_concurrency_cap=soft_concurrency_cap,
             hard_concurrency_cap=hard_concurrency_cap,
             progress=progress,
@@ -76,11 +78,12 @@ async def _async_sql_impl(
     *,
     concurrency: int = 5,
     fail_fast: bool = True,
+    start_comment: str | None = None,
     soft_concurrency_cap: int | None = None,
     hard_concurrency_cap: int = _DEFAULT_HARD_CONCURRENCY_CAP,
     progress: bool = True,
 ) -> dict[str, Any]:
-    task_defs = _validate_tasks(tasks)
+    task_defs = _validate_tasks(tasks, start_comment=start_comment)
     _validate_concurrency(concurrency)
     _validate_optional_soft_concurrency_cap(soft_concurrency_cap)
     _validate_hard_concurrency_cap(hard_concurrency_cap)
@@ -302,17 +305,25 @@ def _is_async_callable(func: Any) -> bool:
 
 def _validate_tasks(
     tasks: Sequence[Mapping[str, Any]],
+    *,
+    start_comment: str | None,
 ) -> list[tuple[str, str, dict[str, Any]]]:
+    default_start_comment = _validate_start_comment(
+        "start_comment",
+        start_comment,
+    )
     if isinstance(tasks, Sequence) and not isinstance(
         tasks,
         (str, bytes, bytearray),
     ):
-        return _validate_task_sequence(tasks)
+        return _validate_task_sequence(tasks, start_comment=default_start_comment)
     raise TypeError("tasks must be a non-empty sequence of task mappings.")
 
 
 def _validate_task_sequence(
     tasks: Sequence[Mapping[str, Any]],
+    *,
+    start_comment: str | None,
 ) -> list[tuple[str, str, dict[str, Any]]]:
     if not tasks:
         raise ValueError("tasks must be a non-empty sequence.")
@@ -327,7 +338,13 @@ def _validate_task_sequence(
             raise ValueError(
                 f"Task at index {index} has invalid name; expected a non-empty string."
             )
-        task_defs.append(_validate_task_spec(task_name, spec_dict))
+        task_defs.append(
+            _validate_task_spec(
+                task_name,
+                spec_dict,
+                default_start_comment=start_comment,
+            )
+        )
 
     return task_defs
 
@@ -335,6 +352,8 @@ def _validate_task_sequence(
 def _validate_task_spec(
     name: str,
     spec: Mapping[str, Any],
+    *,
+    default_start_comment: str | None,
 ) -> tuple[str, str, dict[str, Any]]:
     kwargs = dict(spec)
     task_type = kwargs.pop("type", None)
@@ -348,7 +367,49 @@ def _validate_task_spec(
         )
     if task_type == _PIPELINE_TASK_TYPE:
         kwargs = _validate_pipeline_task(name, kwargs)
+    else:
+        effective_start_comment = default_start_comment
+        if "start_comment" in kwargs:
+            effective_start_comment = _validate_start_comment(
+                f"Task {name!r} start_comment",
+                kwargs.pop("start_comment"),
+            )
+        kwargs = _apply_start_comment(task_type, kwargs, effective_start_comment)
     return name, task_type, kwargs
+
+
+def _validate_start_comment(field_name: str, value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string or None.")
+    if not value.strip():
+        return None
+    return value
+
+
+def _apply_start_comment(
+    task_type: str,
+    kwargs: dict[str, Any],
+    start_comment: str | None,
+) -> dict[str, Any]:
+    if start_comment is None:
+        return kwargs
+
+    sql_field_by_task_type = {
+        "read": "query",
+        "execute": "query",
+        "execute_read": "query",
+        "transfer": "from_sql",
+    }
+    sql_field = sql_field_by_task_type.get(task_type)
+    if sql_field is None:
+        return kwargs
+
+    query = kwargs.get(sql_field)
+    if isinstance(query, str):
+        kwargs[sql_field] = f"{start_comment.rstrip()}\n{query}"
+    return kwargs
 
 
 def _validate_pipeline_task(name: str, kwargs: dict[str, Any]) -> dict[str, Any]:

@@ -83,6 +83,12 @@ preserved, except `None` results are reported as `"success"`. With
 text. A `tqdm` progress bar is shown by default; pass `progress=False` to
 disable it.
 
+Pass `start_comment` to prepend a raw SQL prefix to every `read`, `execute`,
+`execute_read`, and `transfer` task query. For `transfer`, the prefix is applied
+to `from_sql`. A task-level `start_comment` overrides the top-level default;
+`None` or a blank string means no prefix for that task. The prefix is not
+sanitized.
+
 `soft_concurrency_cap` limits actual sync worker execution. When omitted, it
 defaults to `concurrency`. `hard_concurrency_cap` defaults to `10` and rejects
 calls only when actual possible worker execution after soft throttling would
@@ -125,10 +131,16 @@ tasks = [
         "from_sql": "select * from iceberg.events.daily",
         "to_table": "sandbox.events_daily",
         "batch_size": 50_000,
+        "start_comment": "/* copy_events async task */",
     },
 ]
 
-result = sql.async_sql(tasks, concurrency=3, progress=True)
+result = sql.async_sql(
+    tasks,
+    concurrency=3,
+    start_comment="/* nightly async batch */",
+    progress=True,
+)
 
 users_df = result["users"]
 refresh_status = result["refresh_summary"]  # "success"

@@ -494,6 +494,105 @@ def test_parallel_compute_metrics_from_sql_loads_sql_and_delegates(
     }
 
 
+def test_parallel_compute_metrics_from_sql_passes_start_comments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    default_df = pd.DataFrame({"user_id": [1]})
+    override_df = pd.DataFrame({"user_id": [2]})
+    override_pre_df = pd.DataFrame({"user_id": [2], "orders": [1]})
+    blank_df = pd.DataFrame({"user_id": [3]})
+    async_calls: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+
+    def fake_async_sql(
+        tasks: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, pd.DataFrame]:
+        async_calls.append((tasks, kwargs))
+        return {
+            "default:sql": default_df,
+            "override:sql": override_df,
+            "override:pre_exp_sql": override_pre_df,
+            "blank:sql": blank_df,
+        }
+
+    def fake_parallel_compute_metrics(
+        tasks: dict[str, dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, pd.DataFrame]:
+        return {
+            name: pd.DataFrame({"task": [name]})
+            for name in tasks
+        }
+
+    monkeypatch.setattr(parallel_module, "async_sql", fake_async_sql)
+    monkeypatch.setattr(
+        parallel_module,
+        "parallel_compute_metrics",
+        fake_parallel_compute_metrics,
+    )
+
+    result = parallel_module.parallel_compute_metrics_from_sql(
+        {
+            "default": {
+                "sql": "select * from default_task",
+            },
+            "override": {
+                "sql": "select * from override_task",
+                "pre_exp_sql": "select * from override_pre_task",
+                "start_comment": "-- task comment",
+            },
+            "blank": {
+                "sql": "select * from blank_task",
+                "start_comment": "",
+            },
+        },
+        db="analytics_prod",
+        concurrency=3,
+        fail_fast=False,
+        start_comment="-- default comment",
+        progress=False,
+    )
+
+    assert list(result) == ["default", "override", "blank"]
+    assert len(async_calls) == 1
+    sql_tasks, sql_kwargs = async_calls[0]
+    assert sql_kwargs == {
+        "concurrency": 3,
+        "fail_fast": False,
+        "progress": False,
+        "start_comment": "-- default comment",
+    }
+    assert sql_tasks == [
+        {
+            "name": "default:sql",
+            "type": "read",
+            "connection_type": "analytics_prod",
+            "query": "select * from default_task",
+        },
+        {
+            "name": "override:sql",
+            "type": "read",
+            "connection_type": "analytics_prod",
+            "query": "select * from override_task",
+            "start_comment": "-- task comment",
+        },
+        {
+            "name": "override:pre_exp_sql",
+            "type": "read",
+            "connection_type": "analytics_prod",
+            "query": "select * from override_pre_task",
+            "start_comment": "-- task comment",
+        },
+        {
+            "name": "blank:sql",
+            "type": "read",
+            "connection_type": "analytics_prod",
+            "query": "select * from blank_task",
+            "start_comment": "",
+        },
+    ]
+
+
 def test_parallel_compute_metrics_from_sql_fail_fast_false_returns_sql_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -562,6 +661,7 @@ def test_parallel_compute_metrics_from_sql_fail_fast_false_returns_sql_errors(
         ({"task": {}}, ValueError),
         ({"task": {"sql": ""}}, ValueError),
         ({"task": {"sql": "select 1", "pre_exp_sql": ""}}, ValueError),
+        ({"task": {"sql": "select 1", "start_comment": 1}}, ValueError),
     ],
 )
 def test_parallel_compute_metrics_from_sql_validates_task_input(
@@ -572,6 +672,16 @@ def test_parallel_compute_metrics_from_sql_validates_task_input(
         parallel_module.parallel_compute_metrics_from_sql(
             tasks,
             db="analytics_prod",
+            progress=False,
+        )
+
+
+def test_parallel_compute_metrics_from_sql_rejects_non_string_start_comment() -> None:
+    with pytest.raises(ValueError, match="start_comment"):
+        parallel_module.parallel_compute_metrics_from_sql(
+            {"task": {"sql": "select 1"}},
+            db="analytics_prod",
+            start_comment=1,
             progress=False,
         )
 

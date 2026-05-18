@@ -151,12 +151,18 @@ result = parallel_compute_metrics_from_sql(
             "sql": "select * from mart.ab_segment_2",
             "labels": {"segment": "segment2"},
             "test_vs_test": False,
+            "start_comment": "/* segment_2 metrics */",
         },
     },
     db="analytics_prod",
     concurrency=2,
+    start_comment="/* ab metrics batch */",
 )
 ```
+
+The top-level `start_comment` is passed to the SQL reads created for each task.
+A task-level `start_comment` overrides it and applies to both `sql` and
+`pre_exp_sql` for that metrics task.
 
 Format metric comparison output for presentation with `format_ab_metrics`:
 

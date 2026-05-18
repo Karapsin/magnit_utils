@@ -13,6 +13,7 @@ from analytics_toolkit.sql import async_sql
 from .api import compute_test_metrics
 
 _SQL_DATAFRAME_FIELDS = frozenset({"df", "pre_exp_df", "pre_exp_metrics_df"})
+_MISSING = object()
 
 
 def parallel_compute_metrics(
@@ -70,43 +71,50 @@ def parallel_compute_metrics_from_sql(
     *,
     concurrency: int = 5,
     fail_fast: bool = True,
+    start_comment: str | None = None,
     progress: bool = True,
 ) -> dict[str, pd.DataFrame | str]:
     """Load SQL-backed task dataframes, then run ``parallel_compute_metrics``."""
+    _validate_start_comment("start_comment", start_comment)
     task_defs = _validate_sql_tasks(tasks)
     _validate_concurrency(concurrency)
     _validate_progress(progress)
 
     sql_tasks: list[dict[str, Any]] = []
-    for name, kwargs, sql, pre_exp_sql in task_defs:
+    for name, kwargs, sql, pre_exp_sql, task_start_comment in task_defs:
         sql_tasks.append(
-            {
-                "name": _sql_read_task_name(name, "sql"),
-                "type": "read",
-                "connection_type": db,
-                "query": sql,
-            }
+            _make_sql_read_task(
+                name=name,
+                field="sql",
+                db=db,
+                query=sql,
+                start_comment=task_start_comment,
+            )
         )
         if pre_exp_sql is not None:
             sql_tasks.append(
-                {
-                    "name": _sql_read_task_name(name, "pre_exp_sql"),
-                    "type": "read",
-                    "connection_type": db,
-                    "query": pre_exp_sql,
-                }
+                _make_sql_read_task(
+                    name=name,
+                    field="pre_exp_sql",
+                    db=db,
+                    query=pre_exp_sql,
+                    start_comment=task_start_comment,
+                )
             )
 
-    sql_results = async_sql(
-        sql_tasks,
-        concurrency=concurrency,
-        fail_fast=fail_fast,
-        progress=progress,
-    )
+    async_kwargs: dict[str, Any] = {
+        "concurrency": concurrency,
+        "fail_fast": fail_fast,
+        "progress": progress,
+    }
+    if start_comment is not None:
+        async_kwargs["start_comment"] = start_comment
+
+    sql_results = async_sql(sql_tasks, **async_kwargs)
 
     metric_tasks: dict[str, dict[str, Any]] = {}
     sql_failures: dict[str, str] = {}
-    for name, kwargs, _sql, pre_exp_sql in task_defs:
+    for name, kwargs, _sql, pre_exp_sql, _task_start_comment in task_defs:
         df_result = sql_results[_sql_read_task_name(name, "sql")]
         if isinstance(df_result, str):
             sql_failures[name] = df_result
@@ -135,7 +143,7 @@ def parallel_compute_metrics_from_sql(
 
     return {
         name: sql_failures[name] if name in sql_failures else metric_results[name]
-        for name, _kwargs, _sql, _pre_exp_sql in task_defs
+        for name, _kwargs, _sql, _pre_exp_sql, _task_start_comment in task_defs
     }
 
 
@@ -204,13 +212,13 @@ def _validate_task_spec(
 
 def _validate_sql_tasks(
     tasks: Mapping[str, Mapping[str, Any]],
-) -> list[tuple[str, dict[str, Any], str, str | None]]:
+) -> list[tuple[str, dict[str, Any], str, str | None, Any]]:
     if not isinstance(tasks, Mapping):
         raise TypeError("tasks must be a non-empty mapping of task names to task mappings.")
     if not tasks:
         raise ValueError("tasks must be a non-empty mapping.")
 
-    task_defs: list[tuple[str, dict[str, Any], str, str | None]] = []
+    task_defs: list[tuple[str, dict[str, Any], str, str | None, Any]] = []
     for name, spec in tasks.items():
         if not isinstance(name, str) or not name.strip():
             raise ValueError("Task names must be non-empty strings.")
@@ -223,7 +231,7 @@ def _validate_sql_tasks(
 def _validate_sql_task_spec(
     name: str,
     spec: Mapping[str, Any],
-) -> tuple[str, dict[str, Any], str, str | None]:
+) -> tuple[str, dict[str, Any], str, str | None, Any]:
     kwargs = dict(spec)
     ambiguous_fields = sorted(_SQL_DATAFRAME_FIELDS.intersection(kwargs))
     if ambiguous_fields:
@@ -245,8 +253,39 @@ def _validate_sql_task_spec(
     ):
         raise ValueError(f"Task {name!r} pre_exp_sql must be a non-empty string.")
 
+    start_comment: Any = _MISSING
+    if "start_comment" in kwargs:
+        start_comment = kwargs.pop("start_comment")
+        _validate_start_comment(f"Task {name!r} start_comment", start_comment)
+
     _validate_labels(name, kwargs.get("labels"))
-    return name, kwargs, sql, pre_exp_sql
+    return name, kwargs, sql, pre_exp_sql, start_comment
+
+
+def _make_sql_read_task(
+    *,
+    name: str,
+    field: str,
+    db: str,
+    query: str,
+    start_comment: Any,
+) -> dict[str, Any]:
+    task = {
+        "name": _sql_read_task_name(name, field),
+        "type": "read",
+        "connection_type": db,
+        "query": query,
+    }
+    if start_comment is not _MISSING:
+        task["start_comment"] = start_comment
+    return task
+
+
+def _validate_start_comment(field_name: str, value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string or None.")
 
 
 def _sql_read_task_name(name: str, field: str) -> str:
