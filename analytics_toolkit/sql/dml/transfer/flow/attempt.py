@@ -7,6 +7,7 @@ from tqdm import tqdm
 from ....connection.get_sql_connection import get_sql_connection
 from analytics_toolkit.general import time_print
 from ...load.load_sql_table import insert_rows_batch
+from .estimate import estimate_source_rows
 from .finalize import cleanup_stage, finalize_loaded_stage
 from ..runtime.models import (
     AdaptiveBatchSizer,
@@ -96,7 +97,13 @@ def load_stage_batches(
     insert_retry_cnt: int,
 ) -> int:
     total_rows = 0
-    progress_bar = _make_transfer_progress_bar(options)
+    estimated_total_rows = None
+    if options.progress and options.estimate_total_rows:
+        estimated_total_rows = estimate_source_rows(
+            options,
+            connection_refs.source["connection"],
+        )
+    progress_bar = _make_transfer_progress_bar(options, total=estimated_total_rows)
     progress_tracker = _ProgressTracker(progress_bar)
     batch_sizer = AdaptiveBatchSizer(
         enabled=options.adaptive_batch_size,
@@ -175,9 +182,9 @@ class _ProgressTracker:
             self.update(remaining_rows)
 
 
-def _make_transfer_progress_bar(options: TransferOptions) -> Any:
+def _make_transfer_progress_bar(options: TransferOptions, *, total: int | None) -> Any:
     return tqdm(
-        total=None,
+        total=total,
         desc=f"transfer_table {options.to_db_key}.{options.target_table}",
         unit="row",
         disable=not options.progress,

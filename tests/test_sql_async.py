@@ -92,6 +92,7 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
                 "from_sql": "select * from source",
                 "to_table": "sandbox.copy",
                 "batch_size": 10,
+                "estimate_total_rows": True,
             },
         }
     )
@@ -142,6 +143,7 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
         "from_sql": "select * from source",
         "to_table": "sandbox.copy",
         "batch_size": 10,
+        "estimate_total_rows": True,
     }
 
 

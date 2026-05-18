@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 attempt_module = importlib.import_module(
     "analytics_toolkit.sql.dml.transfer.flow.attempt"
 )
+estimate_module = importlib.import_module(
+    "analytics_toolkit.sql.dml.transfer.flow.estimate"
+)
 transfer_api_module = importlib.import_module(
     "analytics_toolkit.sql.dml.transfer.flow.api"
 )
@@ -48,6 +51,54 @@ class RecordingSourceConnection:
 
     def cursor(self) -> RecordingSourceCursor:
         return self.cursor_obj
+
+
+class StaticDbapiCursor:
+    def __init__(
+        self,
+        connection: StaticDbapiConnection,
+        rows: list[tuple[Any, ...]],
+    ) -> None:
+        self.connection = connection
+        self._rows = rows
+        self.close_calls = 0
+
+    def execute(self, query: str) -> None:
+        self.connection.executed.append(query)
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class StaticDbapiConnection:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.rows = rows
+        self.executed: list[str] = []
+        self.rollback_calls = 0
+
+    def cursor(self) -> StaticDbapiCursor:
+        return StaticDbapiCursor(self, self.rows)
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+
+
+class StaticClickHouseResult:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.result_rows = rows
+
+
+class StaticClickHouseClient:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.rows = rows
+        self.queries: list[str] = []
+
+    def query(self, query: str) -> StaticClickHouseResult:
+        self.queries.append(query)
+        return StaticClickHouseResult(self.rows)
 
 
 def test_adaptive_batch_sizer_grows_shrinks_caps_floors_and_can_disable() -> None:
@@ -276,7 +327,87 @@ def test_load_stage_batches_updates_progress_bar(monkeypatch) -> None:
     assert progress_bars[0].closed is True
 
 
-def test_load_stage_batches_progress_false_disables_bar(monkeypatch) -> None:
+def test_load_stage_batches_estimated_total_sets_progress_bar_total(
+    monkeypatch,
+) -> None:
+    source = RecordingSourceConnection(rows=[(row_id,) for row_id in range(3)])
+    connection_refs = models_module.TransferConnectionRefs(
+        source={"connection": source},
+        target={"connection": object()},
+    )
+    stage_state = models_module.TransferStageState(
+        target_exists=False,
+        stage_column_types={"id": "INTEGER"},
+    )
+    options = models_module.TransferOptions(
+        from_db_key="gp",
+        from_db_backend="gp",
+        to_db_key="gp_sandbox",
+        to_db_backend="gp",
+        source_sql="select id from source_table",
+        target_table="sandbox.target",
+        batch_size=2,
+        adaptive_batch_size=False,
+        min_batch_size=1,
+        max_batch_size=4,
+        target_batch_seconds=10.0,
+        estimate_total_rows=True,
+    )
+    progress_bars: list[Any] = []
+
+    class FakeTqdm:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.updates: list[int] = []
+            self.closed = False
+            progress_bars.append(self)
+
+        def update(self, value: int) -> None:
+            self.updates.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_initialize_stage_for_first_batch(
+        options: object,
+        connection_refs: object,
+        stage_state: object,
+        batch: object,
+    ) -> None:
+        del options, connection_refs
+        stage_state.first_non_empty_batch = batch.to_dataframe()
+        stage_state.stage_table = "sandbox.target__stage__abcd1234"
+
+    monkeypatch.setattr(attempt_module, "tqdm", FakeTqdm)
+    monkeypatch.setattr(attempt_module, "estimate_source_rows", lambda *_args: 3)
+    monkeypatch.setattr(
+        attempt_module,
+        "initialize_stage_for_first_batch",
+        fake_initialize_stage_for_first_batch,
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "insert_rows_batch",
+        lambda *args, **kwargs: len(args[4]),
+    )
+
+    total_rows = attempt_module.load_stage_batches(
+        options=options,
+        connection_refs=connection_refs,
+        stage_state=stage_state,
+        read_retry_cnt=1,
+        insert_retry_cnt=1,
+    )
+
+    assert total_rows == 3
+    assert progress_bars[0].kwargs["total"] == 3
+    assert progress_bars[0].updates == [2, 1]
+    assert progress_bars[0].closed is True
+
+
+def test_load_stage_batches_estimator_failure_keeps_unknown_total(
+    monkeypatch,
+) -> None:
     source = RecordingSourceConnection(rows=[(1,), (2,)])
     connection_refs = models_module.TransferConnectionRefs(
         source={"connection": source},
@@ -298,7 +429,7 @@ def test_load_stage_batches_progress_false_disables_bar(monkeypatch) -> None:
         min_batch_size=1,
         max_batch_size=4,
         target_batch_seconds=10.0,
-        progress=False,
+        estimate_total_rows=True,
     )
     progress_bars: list[Any] = []
 
@@ -346,6 +477,87 @@ def test_load_stage_batches_progress_false_disables_bar(monkeypatch) -> None:
     )
 
     assert total_rows == 2
+    assert progress_bars[0].kwargs["total"] is None
+    assert progress_bars[0].updates == [2]
+    assert source.cursor_obj.executed[0].startswith("EXPLAIN (FORMAT JSON)")
+    assert source.cursor_obj.executed[-1] == "select id from source_table"
+
+
+def test_load_stage_batches_progress_false_disables_bar(monkeypatch) -> None:
+    source = RecordingSourceConnection(rows=[(1,), (2,)])
+    connection_refs = models_module.TransferConnectionRefs(
+        source={"connection": source},
+        target={"connection": object()},
+    )
+    stage_state = models_module.TransferStageState(
+        target_exists=False,
+        stage_column_types={"id": "INTEGER"},
+    )
+    options = models_module.TransferOptions(
+        from_db_key="gp",
+        from_db_backend="gp",
+        to_db_key="gp_sandbox",
+        to_db_backend="gp",
+        source_sql="select id from source_table",
+        target_table="sandbox.target",
+        batch_size=2,
+        adaptive_batch_size=False,
+        min_batch_size=1,
+        max_batch_size=4,
+        target_batch_seconds=10.0,
+        progress=False,
+        estimate_total_rows=True,
+    )
+    progress_bars: list[Any] = []
+
+    class FakeTqdm:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+            self.updates: list[int] = []
+            self.closed = False
+            progress_bars.append(self)
+
+        def update(self, value: int) -> None:
+            self.updates.append(value)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_initialize_stage_for_first_batch(
+        options: object,
+        connection_refs: object,
+        stage_state: object,
+        batch: object,
+    ) -> None:
+        del options, connection_refs
+        stage_state.first_non_empty_batch = batch.to_dataframe()
+        stage_state.stage_table = "sandbox.target__stage__abcd1234"
+
+    def unexpected_estimate(*_args: object) -> int:
+        raise AssertionError("unexpected estimate")
+
+    monkeypatch.setattr(attempt_module, "tqdm", FakeTqdm)
+    monkeypatch.setattr(attempt_module, "estimate_source_rows", unexpected_estimate)
+    monkeypatch.setattr(
+        attempt_module,
+        "initialize_stage_for_first_batch",
+        fake_initialize_stage_for_first_batch,
+    )
+    monkeypatch.setattr(
+        attempt_module,
+        "insert_rows_batch",
+        lambda *args, **kwargs: len(args[4]),
+    )
+
+    total_rows = attempt_module.load_stage_batches(
+        options=options,
+        connection_refs=connection_refs,
+        stage_state=stage_state,
+        read_retry_cnt=1,
+        insert_retry_cnt=1,
+    )
+
+    assert total_rows == 2
     assert len(progress_bars) == 1
     assert progress_bars[0].kwargs["disable"] is True
     assert progress_bars[0].updates == [2]
@@ -363,3 +575,93 @@ def test_transfer_table_validates_progress(progress: Any) -> None:
             dry_run=True,
             progress=progress,
         )
+
+
+@pytest.mark.parametrize("estimate_total_rows", [None, 0, 1, "yes"])
+def test_transfer_table_validates_estimate_total_rows(
+    estimate_total_rows: Any,
+) -> None:
+    with pytest.raises(ValueError, match="estimate_total_rows"):
+        transfer_api_module.transfer_table(
+            from_db="gp",
+            to_db="trino",
+            from_sql="select id from source_table",
+            to_table="sandbox.target",
+            dry_run=True,
+            estimate_total_rows=estimate_total_rows,
+        )
+
+
+def test_transfer_dry_run_includes_estimate_total_rows_option() -> None:
+    plan = transfer_api_module.transfer_table(
+        from_db="gp",
+        to_db="trino",
+        from_sql="select id from source_table",
+        to_table="sandbox.target",
+        dry_run=True,
+        estimate_total_rows=True,
+    )
+
+    assert plan.options["estimate_total_rows"] is True
+
+
+@pytest.mark.parametrize(
+    ("backend", "connection", "expected_total", "expected_sql_prefix"),
+    [
+        (
+            "gp",
+            StaticDbapiConnection([('[{"Plan": {"Plan Rows": 123}}]',)]),
+            123,
+            "EXPLAIN (FORMAT JSON)",
+        ),
+        (
+            "trino",
+            StaticDbapiConnection([('{"outputRowCount": 456}',)]),
+            456,
+            "EXPLAIN (TYPE DISTRIBUTED, FORMAT JSON)",
+        ),
+        (
+            "ch",
+            StaticClickHouseClient([("default", "source_table", 1, 789, 1)]),
+            789,
+            "EXPLAIN ESTIMATE",
+        ),
+    ],
+)
+def test_estimate_source_rows_uses_backend_planner_estimates(
+    backend: str,
+    connection: Any,
+    expected_total: int,
+    expected_sql_prefix: str,
+) -> None:
+    options = models_module.TransferOptions(
+        from_db_key=backend,
+        from_db_backend=backend,
+        to_db_key="gp_sandbox",
+        to_db_backend="gp",
+        source_sql="select id from source_table",
+        target_table="sandbox.target",
+        estimate_total_rows=True,
+    )
+
+    estimated_total = estimate_module.estimate_source_rows(options, connection)
+
+    assert estimated_total == expected_total
+    executed = getattr(connection, "executed", getattr(connection, "queries", []))
+    assert executed[0].startswith(expected_sql_prefix)
+
+
+def test_clickhouse_estimator_skips_non_simple_select() -> None:
+    connection = StaticClickHouseClient([("default", "source_table", 1, 789, 1)])
+    options = models_module.TransferOptions(
+        from_db_key="ch",
+        from_db_backend="ch",
+        to_db_key="gp_sandbox",
+        to_db_backend="gp",
+        source_sql="select id from source_table where id > 10",
+        target_table="sandbox.target",
+        estimate_total_rows=True,
+    )
+
+    assert estimate_module.estimate_source_rows(options, connection) is None
+    assert connection.queries == []

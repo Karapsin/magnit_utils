@@ -59,7 +59,9 @@ operation from the beginning with a fresh connection.
 
 `load_df` and `transfer_table` show `tqdm` row progress bars by default during
 data loading. Pass `progress=False` to silence those bars. `dry_run=True` and
-`return_sql=True` return plans without creating progress bars.
+`return_sql=True` return plans without creating progress bars. Transfer row
+progress is indeterminate by default; pass `estimate_total_rows=True` to use a
+best-effort backend planner estimate as the progress total.
 
 `execute_read` accepts the same execution options as `execute_sql`. It splits
 the provided SQL into statements, executes every statement except the last, then
@@ -241,6 +243,11 @@ batches from successful insert latency: faster than half of
 `target_batch_seconds` grows by 50%, slower than twice the target shrinks by
 50%. `min_batch_size` and `max_batch_size` bound the adaptive size; when
 `max_batch_size` is omitted it defaults to `batch_size * 4`.
+Pass `estimate_total_rows=True` to ask the source backend for a non-executing
+planner estimate before streaming batches. Greenplum and Trino use `EXPLAIN`
+JSON output; ClickHouse uses `EXPLAIN ESTIMATE` only for simple single-table
+`SELECT` statements. Estimates are approximate, can be unavailable, and never
+add a `COUNT(*)` query.
 
 Greenplum tables created by `create_sql_table`, `load_df`, `transfer_table`,
 and `create_table_from_sql` default to append-only column-oriented storage:
