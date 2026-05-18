@@ -58,5 +58,6 @@ def _handle_sql_support_matrix(args: argparse.Namespace) -> int:
     print(format_support_matrix())
     return 0
 
+
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
