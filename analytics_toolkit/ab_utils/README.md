@@ -6,6 +6,7 @@ Helpers for AB-test related workflows.
 
 - `compute_test_metrics`: compare experiment groups across all metric columns in a dataframe
 - `do_split`: deterministically sample users and assign AB groups, with optional exact-value stratification
+- `format_ab_metrics`: reshape metric comparison output into a wide presentation table
 - `parallel_compute_metrics`: run named `compute_test_metrics` tasks concurrently
 - `parallel_compute_metrics_from_sql`: load named SQL-backed tasks, then run metric computation concurrently
 
@@ -156,6 +157,21 @@ result = parallel_compute_metrics_from_sql(
     concurrency=2,
 )
 ```
+
+Format metric comparison output for presentation with `format_ab_metrics`:
+
+```python
+formatted = format_ab_metrics(
+    result["segment_1"],
+    label_cols=["segment"],
+    output_type=["metric_values", "p_values", "delta_relative"],
+)
+```
+
+With the default `output_type`, the result is a wide table with label columns,
+`metric`, and one metric-value column per experiment group. Additional output
+types add comparison columns such as `test_vs_control_p_value` and
+`test_vs_control_delta_relative`.
 
 Output notes:
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .api import compute_test_metrics
+from .formatter import format_ab_metrics
 from .parallel import parallel_compute_metrics, parallel_compute_metrics_from_sql
 from .bootstrap import (
     _apply_multiple_comparisons_adjustment,
@@ -84,6 +85,7 @@ __all__ = [
     "DEFAULT_ALPHA",
     "DEFAULT_POWER",
     "compute_test_metrics",
+    "format_ab_metrics",
     "parallel_compute_metrics",
     "parallel_compute_metrics_from_sql",
     "_apply_multiple_comparisons_adjustment",
