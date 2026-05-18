@@ -83,7 +83,6 @@ def _execute_gp(
     except Exception:
         failed_query = statement if statement is not None else query
         time_print(f"SQL failed on gp:\n{failed_query}")
-        rollback_quietly(conn)
         raise
 
 

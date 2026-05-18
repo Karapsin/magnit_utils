@@ -145,6 +145,63 @@ def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> No
     assert second_connection.close_calls == 1
 
 
+def test_execute_sql_gp_failure_preserves_original_exception_and_rolls_back(
+    monkeypatch,
+) -> None:
+    original_error = RuntimeError("database failure")
+
+    class FailingCursor:
+        def __init__(self, connection: FailingGpConnection) -> None:
+            self.connection = connection
+
+        def __enter__(self) -> FailingCursor:
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            return None
+
+        def execute(self, query: str) -> None:
+            self.connection.executed.append(query)
+            raise original_error
+
+    class FailingGpConnection(FakeConnection):
+        def __init__(self) -> None:
+            super().__init__("gp")
+            self.executed: list[str] = []
+            self.commit_calls = 0
+
+        def cursor(self) -> FailingCursor:
+            return FailingCursor(self)
+
+        def commit(self) -> None:
+            self.commit_calls += 1
+
+    connection = FailingGpConnection()
+    monkeypatch.setattr(
+        execute_sql_module,
+        "get_sql_connection",
+        lambda connection_type: connection,
+    )
+
+    try:
+        execute_sql_module.execute_sql(
+            "gp",
+            "select 1",
+            random_sleep_seconds=None,
+            retry_cnt=1,
+            timeout_increment=0,
+        )
+    except RuntimeError as exc:
+        assert exc is original_error
+    else:
+        raise AssertionError("Expected original database exception.")
+
+    assert connection.executed == ["select 1"]
+    assert connection.rollback_calls == 1
+    assert connection.close_calls == 1
+    assert connection.commit_calls == 0
+
+
 def test_run_with_retry_does_not_retry_trino_syntax_error() -> None:
     attempts: list[int] = []
 
