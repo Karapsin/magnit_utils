@@ -55,6 +55,7 @@ def is_non_retryable_sql_error(exc: Exception) -> bool:
     class_names = _exception_class_names(exc)
     if class_names & {
         "SyntaxError",
+        "UndefinedObject",
         "UndefinedTable",
         "UndefinedColumn",
         "UndefinedFunction",
@@ -69,6 +70,7 @@ def is_non_retryable_sql_error(exc: Exception) -> bool:
     sqlstate = str(getattr(exc, "pgcode", "") or getattr(exc, "sqlstate", "")).strip()
     if sqlstate in {
         "42601",  # syntax_error
+        "42704",  # undefined_object
         "42P01",  # undefined_table
         "42703",  # undefined_column
         "42883",  # undefined_function
@@ -94,9 +96,8 @@ def is_non_retryable_sql_error(exc: Exception) -> bool:
     message = _exception_message(exc)
     if any(pattern in message for pattern in _NON_RETRYABLE_MESSAGE_PATTERNS):
         return True
-    return "table" in message and (
-        "does not exist" in message or "doesn't exist" in message
-    )
+    missing_object = "does not exist" in message or "doesn't exist" in message
+    return missing_object and ("table" in message or "type " in message)
 
 
 def _exception_class_names(exc: BaseException) -> set[str]:

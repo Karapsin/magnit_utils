@@ -32,6 +32,10 @@ class FakeUndefinedTableError(Exception):
     pgcode = "42P01"
 
 
+class FakeUndefinedObjectError(Exception):
+    pgcode = "42704"
+
+
 class FakeTrinoSyntaxError(Exception):
     error_name = "SYNTAX_ERROR"
 
@@ -106,6 +110,67 @@ def test_read_sql_does_not_retry_undefined_table(monkeypatch) -> None:
     assert first_connection.rollback_calls == 1
     assert first_connection.close_calls == 1
     assert second_connection.close_calls == 0
+
+
+def test_read_sql_does_not_retry_undefined_object(monkeypatch) -> None:
+    first_connection = FakeConnection("first")
+    second_connection = FakeConnection("second")
+    connections = [first_connection, second_connection]
+    attempts: list[str] = []
+
+    monkeypatch.setattr(
+        read_sql_module,
+        "get_sql_connection",
+        lambda connection_type: connections.pop(0),
+    )
+
+    def fake_read_gp(conn: FakeConnection, query: str, print_queries: bool = True) -> pd.DataFrame:
+        attempts.append(conn.name)
+        raise FakeUndefinedObjectError(
+            'type "string" does not exist\nLINE 24: cast(start_dt as string)'
+        )
+
+    monkeypatch.setattr(read_sql_module, "_read_gp", fake_read_gp)
+
+    try:
+        read_sql_module.read_sql(
+            "gp",
+            "select cast(start_dt as string) as start_dt from source_table",
+            retry_cnt=3,
+            timeout_increment=0,
+        )
+    except FakeUndefinedObjectError:
+        pass
+    else:
+        raise AssertionError("Expected undefined-object error to be raised.")
+
+    assert attempts == ["first"]
+    assert len(connections) == 1
+    assert first_connection.rollback_calls == 1
+    assert first_connection.close_calls == 1
+    assert second_connection.close_calls == 0
+
+
+def test_run_with_retry_does_not_retry_missing_type_message() -> None:
+    attempts: list[int] = []
+
+    def operation(attempt: int) -> None:
+        attempts.append(attempt)
+        raise RuntimeError('type "string" does not exist')
+
+    try:
+        retry_module.run_with_retry(
+            operation_name="reading query on gp (gp)",
+            retry_cnt=3,
+            timeout_increment=0,
+            operation=operation,
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("Expected missing-type error to be raised.")
+
+    assert attempts == [1]
 
 
 def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> None:
