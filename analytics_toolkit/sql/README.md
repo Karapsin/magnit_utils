@@ -22,6 +22,7 @@ sql.async_sql(
     hard_concurrency_cap=10,
     progress=True,
 )
+sql.gp_cancel_all_running_queries(...)
 sql.gp_vacuum(...)
 sql.create_sql_table(...)
 sql.ch_create_table_as(...)
@@ -40,6 +41,8 @@ sql.get_sql_connection(...)
   dataframe
 - `async_sql`: run a named batch of independent SQL tasks or custom pipelines
   concurrently through the existing sync APIs
+- `gp_cancel_all_running_queries`: cancel current-user Greenplum backend
+  queries, excluding the caller session
 - `gp_vacuum`: run Greenplum `VACUUM` outside a transaction block
 - `create_sql_table`: build and execute `CREATE TABLE` statements
 - `ch_create_table_as`: recreate a ClickHouse distributed/shard table pair
@@ -369,6 +372,16 @@ from analytics_toolkit import sql
 sql.gp_vacuum("cvm_sbx.some_table")
 sql.gp_vacuum("cvm_sbx.some_table", analyze=True)
 sql.gp_vacuum("cvm_sbx.some_table", full=True, verbose=True)
+```
+
+Use `gp_cancel_all_running_queries` to cancel every current-user Greenplum
+backend PID returned from `pg_stat_activity`, excluding the caller session. It
+returns one row per PID with the generated `pg_cancel_backend` query and the
+boolean cancellation result. Set `concurrency` above `1` to run cancellation
+queries in parallel with separate fresh connections.
+
+```python
+cancelled = sql.gp_cancel_all_running_queries("gp", concurrency=4)
 ```
 
 ## Configuration

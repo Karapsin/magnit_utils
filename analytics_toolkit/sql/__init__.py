@@ -13,6 +13,7 @@ from .connection.errors import SqlOperationContext, SqlOperationError
 from .connection.get_sql_connection import get_sql_connection, with_sql_connection
 from .dml.load.load_df import load_df
 from .dml.io.read_sql import read_sql, read_sql as read
+from .dml.io.gp_cancel import gp_cancel_all_running_queries
 from .dml.table.ch_create_table_as import ch_create_table_as
 from .dml.table.ch_full_table_move import ch_full_table_move
 from .dml.table.create_table_from_sql import create_table_from_sql
@@ -35,6 +36,7 @@ __all__ = [
     "create_sql_table",
     "create_table_from_sql",
     "get_sql_connection",
+    "gp_cancel_all_running_queries",
     "gp_vacuum",
     "load_df",
     "read",
