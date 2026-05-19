@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Real
 from typing import Any
 
 import pandas as pd
@@ -48,18 +49,45 @@ _COMPARISON_OUTPUTS = {
     "outliers_cutoff": ("outliers_cutoff", "outliers_cutoff"),
 }
 
-_SUPPORTED_OUTPUTS = frozenset(_GROUP_OUTPUTS) | frozenset(_COMPARISON_OUTPUTS)
+_SIGNIFICANT_DELTA_OUTPUTS = {
+    "delta_relative_significant": ("delta_relative", "delta_relative_significant"),
+    "delta_absolute_significant": ("delta_abs", "delta_absolute_significant"),
+}
+
+_SIGNIFICANCE_P_VALUE_COLUMNS = {
+    "p_values": _COMPARISON_OUTPUTS["p_values"][0],
+    "p_values_cuped": _COMPARISON_OUTPUTS["p_values_cuped"][0],
+    "p_values_adj": _COMPARISON_OUTPUTS["p_values_adj"][0],
+}
+
+_SUPPORTED_OUTPUTS = (
+    frozenset(_GROUP_OUTPUTS)
+    | frozenset(_COMPARISON_OUTPUTS)
+    | frozenset(_SIGNIFICANT_DELTA_OUTPUTS)
+)
 
 
 def format_ab_metrics(
     df: pd.DataFrame,
     label_cols: list[str] | None = None,
-    output_type: list[str] | None = None,
+    output_type: str | list[str] | None = None,
+    significance_alpha: float | None = None,
+    significance_p_value: str | None = None,
 ) -> pd.DataFrame:
     """Format AB metric comparison rows into a wide presentation dataframe."""
     labels = _validate_label_cols(df, label_cols)
     outputs = _validate_output_type(output_type)
-    _validate_source_columns(df, labels, outputs)
+    significance_source_column = _validate_significance_options(
+        outputs=outputs,
+        significance_alpha=significance_alpha,
+        significance_p_value=significance_p_value,
+    )
+    _validate_source_columns(
+        df=df,
+        label_cols=labels,
+        outputs=outputs,
+        significance_source_column=significance_source_column,
+    )
 
     group_order = _ordered_groups(df)
     comparison_order = _ordered_comparisons(df)
@@ -115,7 +143,7 @@ def format_ab_metrics(
                         value=source_row[value_col],
                         allow_existing_equal=True,
                     )
-            else:
+            elif output in _COMPARISON_OUTPUTS:
                 value_col, suffix = _COMPARISON_OUTPUTS[output]
                 output_column = _comparison_output_column(
                     test_group=_column_part(source_row["group_1"]),
@@ -128,6 +156,27 @@ def format_ab_metrics(
                     assigned_cells=assigned_cells,
                     output_column=output_column,
                     value=source_row[value_col],
+                    allow_existing_equal=False,
+                )
+            else:
+                value_col, suffix = _SIGNIFICANT_DELTA_OUTPUTS[output]
+                output_column = _comparison_output_column(
+                    test_group=_column_part(source_row["group_1"]),
+                    baseline_group=_column_part(source_row["group_2"]),
+                    suffix=suffix,
+                )
+                value = _significant_delta_value(
+                    source_row=source_row,
+                    value_col=value_col,
+                    significance_source_column=significance_source_column,
+                    significance_alpha=significance_alpha,
+                )
+                _set_output_value(
+                    row_key=row_key,
+                    target_row=target_row,
+                    assigned_cells=assigned_cells,
+                    output_column=output_column,
+                    value=value,
                     allow_existing_equal=False,
                 )
 
@@ -151,10 +200,17 @@ def _validate_label_cols(df: pd.DataFrame, label_cols: list[str] | None) -> list
     return list(label_cols)
 
 
-def _validate_output_type(output_type: list[str] | None) -> list[str]:
-    outputs = ["metric_values"] if output_type is None else output_type
+def _validate_output_type(output_type: str | list[str] | None) -> list[str]:
+    if output_type is None:
+        outputs = ["metric_values"]
+    elif isinstance(output_type, str):
+        outputs = [output_type]
+    else:
+        outputs = output_type
     if not isinstance(outputs, list) or not outputs:
-        raise ValueError("output_type must be a non-empty list of output names or None.")
+        raise ValueError(
+            "output_type must be an output name, a non-empty list of output names, or None."
+        )
     invalid_outputs = [
         output
         for output in outputs
@@ -169,10 +225,45 @@ def _validate_output_type(output_type: list[str] | None) -> list[str]:
     return list(outputs)
 
 
+def _validate_significance_options(
+    *,
+    outputs: Sequence[str],
+    significance_alpha: float | None,
+    significance_p_value: str | None,
+) -> str | None:
+    significant_outputs = [
+        output for output in outputs if output in _SIGNIFICANT_DELTA_OUTPUTS
+    ]
+    if not significant_outputs:
+        return None
+
+    if significance_alpha is None:
+        raise ValueError(
+            "significance_alpha is required when requesting significant delta outputs."
+        )
+    if (
+        not isinstance(significance_alpha, Real)
+        or isinstance(significance_alpha, bool)
+        or not 0 < significance_alpha < 1
+    ):
+        raise ValueError("significance_alpha must be numeric and between 0 and 1.")
+
+    if significance_p_value is None:
+        raise ValueError(
+            "significance_p_value is required when requesting significant delta outputs."
+        )
+    if significance_p_value not in _SIGNIFICANCE_P_VALUE_COLUMNS:
+        supported = ", ".join(sorted(_SIGNIFICANCE_P_VALUE_COLUMNS))
+        raise ValueError(f"significance_p_value must be one of: {supported}.")
+
+    return _SIGNIFICANCE_P_VALUE_COLUMNS[significance_p_value]
+
+
 def _validate_source_columns(
     df: pd.DataFrame,
     label_cols: Sequence[str],
     outputs: Sequence[str],
+    significance_source_column: str | None,
 ) -> None:
     missing_required = sorted(_REQUIRED_COLUMNS.difference(df.columns))
     if missing_required:
@@ -184,8 +275,12 @@ def _validate_source_columns(
             source_columns.update(
                 value_col for _group_col, value_col, _suffix in _GROUP_OUTPUTS[output]
             )
-        else:
+        elif output in _COMPARISON_OUTPUTS:
             source_columns.add(_COMPARISON_OUTPUTS[output][0])
+        else:
+            source_columns.add(_SIGNIFICANT_DELTA_OUTPUTS[output][0])
+    if significance_source_column is not None:
+        source_columns.add(significance_source_column)
 
     missing_sources = sorted(column for column in source_columns if column not in df.columns)
     if missing_sources:
@@ -236,8 +331,18 @@ def _build_output_columns(
                 )
                 for group_name in groups
             )
-        else:
+        elif output in _COMPARISON_OUTPUTS:
             _source_column, suffix = _COMPARISON_OUTPUTS[output]
+            columns.extend(
+                _comparison_output_column(
+                    test_group=test_group,
+                    baseline_group=baseline_group,
+                    suffix=suffix,
+                )
+                for test_group, baseline_group in comparisons
+            )
+        else:
+            _source_column, suffix = _SIGNIFICANT_DELTA_OUTPUTS[output]
             columns.extend(
                 _comparison_output_column(
                     test_group=test_group,
@@ -308,6 +413,23 @@ def _set_output_value(
         )
     assigned_cells.add(cell_key)
     target_row[output_column] = value
+
+
+def _significant_delta_value(
+    *,
+    source_row: pd.Series,
+    value_col: str,
+    significance_source_column: str | None,
+    significance_alpha: float | None,
+) -> Any:
+    if significance_source_column is None or significance_alpha is None:
+        raise ValueError(
+            "Significance configuration is required for significant delta outputs."
+        )
+    p_value = source_row[significance_source_column]
+    if pd.notna(p_value) and p_value < significance_alpha:
+        return source_row[value_col]
+    return float("nan")
 
 
 def _values_equal(left: Any, right: Any) -> bool:

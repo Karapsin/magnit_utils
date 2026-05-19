@@ -127,6 +127,114 @@ def test_format_ab_metrics_supports_multiple_output_types() -> None:
     pd.testing.assert_frame_equal(result, expected)
 
 
+def test_format_ab_metrics_accepts_single_output_type_string() -> None:
+    df = _build_metric_rows()
+
+    result = format_ab_metrics(df, output_type="delta_relative")
+    expected = format_ab_metrics(df, output_type=["delta_relative"])
+
+    pd.testing.assert_frame_equal(result, expected)
+
+
+def test_format_ab_metrics_supports_significant_delta_outputs() -> None:
+    result = format_ab_metrics(
+        _build_metric_rows(),
+        output_type=["delta_relative_significant", "delta_absolute_significant"],
+        significance_alpha=0.05,
+        significance_p_value="p_values",
+    )
+
+    expected = pd.DataFrame(
+        {
+            "metric": ["orders", "gmv"],
+            "test_vs_control_delta_relative_significant": [0.2, np.nan],
+            "test_vs_control_delta_absolute_significant": [2.0, np.nan],
+        }
+    )
+    pd.testing.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    ("significance_p_value", "expected_values"),
+    [
+        ("p_values", [0.2, np.nan]),
+        ("p_values_cuped", [np.nan, 0.1]),
+        ("p_values_adj", [0.2, np.nan]),
+    ],
+)
+def test_format_ab_metrics_uses_configured_significance_p_value_source(
+    significance_p_value: str,
+    expected_values: list[float],
+) -> None:
+    df = _build_metric_rows()
+    df["p-value"] = [0.04, 0.2]
+    df["p-value CUPED"] = [0.2, 0.04]
+    df["bootstrap_adj_p"] = [0.01, 0.2]
+
+    result = format_ab_metrics(
+        df,
+        output_type=["delta_relative_significant"],
+        significance_alpha=0.05,
+        significance_p_value=significance_p_value,
+    )
+
+    expected = pd.DataFrame(
+        {
+            "metric": ["orders", "gmv"],
+            "test_vs_control_delta_relative_significant": expected_values,
+        }
+    )
+    pd.testing.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"significance_p_value": "p_values"},
+        {"significance_alpha": 0.05},
+    ],
+)
+def test_format_ab_metrics_requires_significance_configuration(
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="required"):
+        format_ab_metrics(
+            _build_metric_rows(),
+            output_type=["delta_relative_significant"],
+            **kwargs,
+        )
+
+
+def test_format_ab_metrics_validates_significance_configuration() -> None:
+    with pytest.raises(ValueError, match="significance_alpha"):
+        format_ab_metrics(
+            _build_metric_rows(),
+            output_type=["delta_relative_significant"],
+            significance_alpha=1.0,
+            significance_p_value="p_values",
+        )
+
+    with pytest.raises(ValueError, match="significance_p_value"):
+        format_ab_metrics(
+            _build_metric_rows(),
+            output_type=["delta_relative_significant"],
+            significance_alpha=0.05,
+            significance_p_value="unknown",
+        )
+
+
+def test_format_ab_metrics_raises_for_missing_significance_p_value_source() -> None:
+    df = _build_metric_rows().drop(columns=["p-value CUPED"])
+
+    with pytest.raises(ValueError, match="Missing source column"):
+        format_ab_metrics(
+            df,
+            output_type=["delta_relative_significant"],
+            significance_alpha=0.05,
+            significance_p_value="p_values_cuped",
+        )
+
+
 def test_format_ab_metrics_raises_for_duplicate_output_cells() -> None:
     df = pd.concat(
         [_build_metric_rows().iloc[[0]], _build_metric_rows().iloc[[0]]],

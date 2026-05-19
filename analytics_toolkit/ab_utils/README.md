@@ -170,14 +170,21 @@ Format metric comparison output for presentation with `format_ab_metrics`:
 formatted = format_ab_metrics(
     result["segment_1"],
     label_cols=["segment"],
-    output_type=["metric_values", "p_values", "delta_relative"],
+    output_type=["metric_values", "p_values", "delta_relative_significant"],
+    significance_alpha=0.05,
+    significance_p_value="p_values",
 )
 ```
 
 With the default `output_type`, the result is a wide table with label columns,
 `metric`, and one metric-value column per experiment group. Additional output
 types add comparison columns such as `test_vs_control_p_value` and
-`test_vs_control_delta_relative`.
+`test_vs_control_delta_relative`. `output_type` accepts either one output name
+or a list of output names. Significant delta outputs add columns such as
+`test_vs_control_delta_relative_significant` and keep the delta only when the
+configured p-value is below `significance_alpha`; otherwise they return `NaN`.
+Use `significance_p_value="p_values"`, `"p_values_cuped"`, or `"p_values_adj"`
+to choose the p-value source.
 
 Output notes:
 
@@ -190,6 +197,8 @@ Output notes:
 - `variance_control` and `variance_test` contain the uncertainty variance inputs for each group
 - `s.e.` is the standard error of `delta_abs`
 - `delta_relative` and `mde_relative` are raw relative changes, e.g. `0.05` for 5%
+- `delta_relative_significant` and `delta_absolute_significant` format `delta_relative`
+  and `delta_abs` only when the configured p-value is significant
 - when `pre_exp_metrics_df` is provided, `s.e. CUPED` and `p-value CUPED` are added after `p-value`
 - when `multiple_comparisons_adjustment=True`, `s.e. bootstrap` and `bootstrap_adj_p` are added after CUPED columns, if any
 
