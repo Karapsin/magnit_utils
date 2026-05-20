@@ -168,6 +168,30 @@ def test_execute_read_gp_break_query_executes_setup_statements_separately(
     assert connection.commit_calls == 2
 
 
+def test_execute_read_logs_elapsed_for_setup_and_final_query_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeDbapiConnection()
+    monkeypatch.setattr(
+        execute_read_module,
+        "get_sql_connection",
+        lambda connection_key: connection,
+    )
+
+    execute_read_module.execute_read(
+        "gp",
+        "CREATE TEMP TABLE tmp AS SELECT 1; SELECT * FROM tmp",
+        gp_break_query=True,
+        retry_cnt=1,
+        timeout_increment=0,
+    )
+
+    output = capsys.readouterr().out
+    assert "Executing query:" not in output
+    assert output.count("SQL query on gp finished: success in ") == 2
+
+
 def test_execute_read_retries_with_fresh_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -175,6 +199,7 @@ def test_execute_read_retries_with_fresh_connection(
     second_connection = FakeClickHouseClient(pd.DataFrame({"value": [2]}))
     connections = [first_connection, second_connection]
     attempts: list[FakeClickHouseClient] = []
+    print_flags: list[bool] = []
 
     monkeypatch.setattr(
         execute_read_module,
@@ -188,6 +213,7 @@ def test_execute_read_retries_with_fresh_connection(
         print_queries: bool = True,
     ) -> pd.DataFrame:
         attempts.append(client)
+        print_flags.append(print_queries)
         if client is first_connection:
             raise RuntimeError("temporary failure")
         return client.result
@@ -207,6 +233,7 @@ def test_execute_read_retries_with_fresh_connection(
 
     pd.testing.assert_frame_equal(result, pd.DataFrame({"value": [2]}))
     assert attempts == [first_connection, second_connection]
+    assert print_flags == [False, False]
     assert first_connection.close_calls == 1
     assert second_connection.close_calls == 1
 

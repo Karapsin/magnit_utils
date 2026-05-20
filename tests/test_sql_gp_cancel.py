@@ -178,6 +178,7 @@ def test_gp_cancel_empty_pid_result_returns_expected_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+    print_flags: list[bool] = []
 
     def fake_read_sql(
         connection_key: str,
@@ -187,18 +188,17 @@ def test_gp_cancel_empty_pid_result_returns_expected_columns(
         timeout_increment: int | float = 5,
         query_label: str | None = None,
     ) -> pd.DataFrame:
-        del connection_key, print_queries, retry_cnt, timeout_increment, query_label
+        del connection_key, retry_cnt, timeout_increment, query_label
+        print_flags.append(print_queries)
         calls.append(query)
         return pd.DataFrame({"pid": []})
 
     monkeypatch.setattr(gp_cancel_module, "read_sql", fake_read_sql)
 
-    result = gp_cancel_module.gp_cancel_all_running_queries(
-        "gp",
-        print_queries=False,
-    )
+    result = gp_cancel_module.gp_cancel_all_running_queries("gp")
 
     assert calls == [PID_QUERY]
+    assert print_flags == [False]
     assert result.empty
     assert result.columns.tolist() == ["pid", "cancel_query", "cancelled"]
 
@@ -221,4 +221,3 @@ def test_gp_cancel_rejects_non_gp_alias(monkeypatch: pytest.MonkeyPatch) -> None
         match="requires a gp connection",
     ):
         gp_cancel_module.gp_cancel_all_running_queries("trino")
-

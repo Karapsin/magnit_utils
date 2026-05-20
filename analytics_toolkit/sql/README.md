@@ -91,6 +91,12 @@ preserved, except `None` results are reported as `"success"`. With
 text. A `tqdm` progress bar is shown by default; pass `progress=False` to
 disable it.
 
+SQL query text is not printed by default. Pass `print_queries=True` to
+`read_sql`, `execute_sql`, `execute_read`, or `gp_cancel_all_running_queries`
+when you want each statement echoed before execution. `read_sql`,
+`execute_sql`, and `execute_read` still log elapsed time after every executed
+query or statement.
+
 Pass `start_comment` to prepend a raw SQL prefix to every `read`, `execute`,
 `execute_read`, and `transfer` task query. For `transfer`, the prefix is applied
 to `from_sql`. A task-level `start_comment` overrides the top-level default;
@@ -113,7 +119,6 @@ tasks = [
         "type": "read",
         "connection_type": "gp",
         "query": "select user_id, segment from sandbox.users",
-        "print_queries": False,
     },
     {
         "name": "refresh_summary",
@@ -167,7 +172,6 @@ def read_row_count(context):
     return sql.read(
         "gp",
         "select count(*) as row_count from sandbox.source_table",
-        print_queries=False,
     )
 
 
@@ -232,7 +236,6 @@ def finalize_parts(context):
         union all
         select * from sandbox.part_b
         """,
-        print_queries=False,
     )
 ```
 
@@ -336,7 +339,6 @@ planned_execute = sql.execute(
 read_result = sql.read(
     "gp",
     "select * from sandbox.scores",
-    print_queries=False,
     return_metadata=True,
 )
 scores_df = read_result.data

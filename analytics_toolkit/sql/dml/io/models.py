@@ -8,7 +8,7 @@ class ReadSqlOptions:
     connection_key: str
     backend: str
     sql: str
-    print_queries: bool = True
+    print_queries: bool = False
     retry_cnt: int = 5
     timeout_increment: int | float = 5
     query_label: str | None = None
@@ -20,7 +20,7 @@ class ExecuteSqlOptions:
     connection_key: str
     backend: str
     sql: str
-    print_queries: bool = True
+    print_queries: bool = False
     gp_break_query: bool = False
     gp_commit_each_statement: bool = False
     retry_cnt: int = 5
@@ -36,7 +36,7 @@ class ExecuteReadOptions:
     connection_key: str
     backend: str
     statements: list[str]
-    print_queries: bool = True
+    print_queries: bool = False
     gp_break_query: bool = False
     gp_commit_each_statement: bool = False
     retry_cnt: int = 5

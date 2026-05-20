@@ -45,6 +45,7 @@ def test_read_sql_retries_whole_flow_with_fresh_gp_connection(monkeypatch) -> No
     second_connection = FakeConnection("second")
     connections = [first_connection, second_connection]
     attempts: list[str] = []
+    print_flags: list[bool] = []
     expected = pd.DataFrame({"value": [1]})
 
     monkeypatch.setattr(
@@ -55,6 +56,7 @@ def test_read_sql_retries_whole_flow_with_fresh_gp_connection(monkeypatch) -> No
 
     def fake_read_gp(conn: FakeConnection, query: str, print_queries: bool = True) -> pd.DataFrame:
         attempts.append(conn.name)
+        print_flags.append(print_queries)
         if conn.name == "first":
             raise RuntimeError("temporary failure")
         return expected
@@ -70,6 +72,7 @@ def test_read_sql_retries_whole_flow_with_fresh_gp_connection(monkeypatch) -> No
 
     pd.testing.assert_frame_equal(result, expected)
     assert attempts == ["first", "second"]
+    assert print_flags == [False, False]
     assert first_connection.rollback_calls == 1
     assert first_connection.close_calls == 1
     assert second_connection.close_calls == 1
@@ -178,6 +181,7 @@ def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> No
     second_connection = FakeConnection("second")
     connections = [first_connection, second_connection]
     attempts: list[str] = []
+    print_flags: list[bool] = []
 
     monkeypatch.setattr(
         execute_sql_module,
@@ -191,6 +195,7 @@ def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> No
         print_queries: bool = True,
     ) -> None:
         attempts.append(conn.name)
+        print_flags.append(print_queries)
         if conn.name == "first":
             raise RuntimeError("temporary failure")
 
@@ -204,6 +209,7 @@ def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> No
     )
 
     assert attempts == ["first", "second"]
+    assert print_flags == [False, False]
     assert first_connection.close_calls == 1
     assert second_connection.close_calls == 1
 

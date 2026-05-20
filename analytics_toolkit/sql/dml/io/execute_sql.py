@@ -16,6 +16,7 @@ from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
 from ...operation_runner import run_connection_operation, tracked_sql_operation
 from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
+from ...query_timing import run_timed_query
 from analytics_toolkit.general import time_print
 from .models import ExecuteSqlOptions
 
@@ -23,7 +24,7 @@ from .models import ExecuteSqlOptions
 def _execute_trino(
     conn: Any,
     query: str,
-    print_queries: bool = True,
+    print_queries: bool = False,
 ) -> Any:
     cursor = conn.cursor()
     statements = _split_sql_statements(query)
@@ -32,7 +33,13 @@ def _execute_trino(
     try:
         for statement in _iterate_statements_with_progress(statements, "trino"):
             _maybe_print_query(statement, print_queries, split_preview=True)
-            _execute_trino_statement(cursor, statement)
+            run_timed_query(
+                "trino",
+                lambda statement=statement: _execute_trino_statement(
+                    cursor,
+                    statement,
+                ),
+            )
     except Exception:
         failed_query = statement if statement is not None else query
         time_print(f"SQL failed on trino:\n{failed_query}")
@@ -43,7 +50,7 @@ def _execute_trino(
 def _execute_gp(
     conn: Any,
     query: str,
-    print_queries: bool = True,
+    print_queries: bool = False,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
 ) -> Any:
@@ -55,13 +62,16 @@ def _execute_gp(
                 time_print("Executing 1 statement set on gp")
                 statement = query
                 _maybe_print_query(statement, print_queries, split_preview=False)
-                cursor.execute(statement)
+                run_timed_query("gp", lambda: cursor.execute(statement))
             else:
                 statements = _split_sql_statements(query)
                 time_print(f"Executing {len(statements)} statement(s) on gp")
                 for statement in _iterate_statements_with_progress(statements, "gp"):
                     _maybe_print_query(statement, print_queries, split_preview=True)
-                    cursor.execute(statement)
+                    run_timed_query(
+                        "gp",
+                        lambda statement=statement: cursor.execute(statement),
+                    )
                     if gp_commit_each_statement:
                         conn.commit()
                         should_commit_at_end = False
@@ -77,7 +87,7 @@ def _execute_gp(
 def _execute_ch(
     client: Any,
     query: str,
-    print_queries: bool = True,
+    print_queries: bool = False,
 ) -> Any:
     statements = _split_sql_statements(query)
     time_print(f"Executing {len(statements)} statement(s) on ch")
@@ -85,7 +95,10 @@ def _execute_ch(
     try:
         for statement in _iterate_statements_with_progress(statements, "ch"):
             _maybe_print_query(statement, print_queries, split_preview=True)
-            _execute_ch_statement(client, statement)
+            run_timed_query(
+                "ch",
+                lambda statement=statement: _execute_ch_statement(client, statement),
+            )
     except Exception:
         failed_query = statement if statement is not None else query
         time_print(f"SQL failed on ch:\n{failed_query}")
@@ -96,7 +109,7 @@ def _execute_ch(
 def execute_sql(
     connection_type: str,
     query: str,
-    print_queries: bool = True,
+    print_queries: bool = False,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
     retry_cnt: int = 5,

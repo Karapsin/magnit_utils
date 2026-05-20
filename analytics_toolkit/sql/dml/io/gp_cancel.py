@@ -20,7 +20,7 @@ _GP_CANCEL_RESULT_COLUMNS = ["pid", "cancel_query", "cancelled"]
 def gp_cancel_all_running_queries(
     connection_key: str = "gp",
     concurrency: int = 1,
-    print_queries: bool = True,
+    print_queries: bool = False,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
     query_label: str | None = None,
@@ -79,4 +79,3 @@ def _validate_concurrency(concurrency: int) -> None:
         or concurrency < 1
     ):
         raise ValueError("concurrency must be an integer >= 1.")
-

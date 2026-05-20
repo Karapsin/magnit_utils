@@ -17,11 +17,12 @@ from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
 from ...operation_runner import run_connection_operation, tracked_sql_operation
 from ...plans import SqlOperationMetadata, SqlOperationResult
+from ...query_timing import run_timed_query
 from analytics_toolkit.general import time_print
 from .models import ReadSqlOptions
 
 
-def _read_trino(conn: Any, query: str, print_queries: bool = True) -> pd.DataFrame:
+def _read_trino(conn: Any, query: str, print_queries: bool = False) -> pd.DataFrame:
     return get_backend_adapter("trino").read_dataframe(
         conn,
         query,
@@ -31,7 +32,7 @@ def _read_trino(conn: Any, query: str, print_queries: bool = True) -> pd.DataFra
     )
 
 
-def _read_gp(conn: Any, query: str, print_queries: bool = True) -> pd.DataFrame:
+def _read_gp(conn: Any, query: str, print_queries: bool = False) -> pd.DataFrame:
     return get_backend_adapter("gp").read_dataframe(
         conn,
         query,
@@ -41,7 +42,7 @@ def _read_gp(conn: Any, query: str, print_queries: bool = True) -> pd.DataFrame:
     )
 
 
-def _read_ch(client: Any, query: str, print_queries: bool = True) -> pd.DataFrame:
+def _read_ch(client: Any, query: str, print_queries: bool = False) -> pd.DataFrame:
     return get_backend_adapter("ch").read_dataframe(
         client,
         query,
@@ -65,7 +66,7 @@ def _read_dbapi_query(conn: Any, query: str) -> pd.DataFrame:
 def read_sql(
     connection_type: str,
     query: str,
-    print_queries: bool = True,
+    print_queries: bool = False,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
     query_label: str | None = None,
@@ -85,7 +86,7 @@ def read_sql(
 def read_sql_with_metadata(
     connection_type: str,
     query: str,
-    print_queries: bool = True,
+    print_queries: bool = False,
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
     query_label: str | None = None,
@@ -246,8 +247,11 @@ def _read_backend(
         raise UnsupportedConnectionTypeError(
             "Unsupported connection type. Expected one of: 'trino', 'gp', 'ch'."
         )
-    return globals()[function_name](
-        connection,
-        sql,
-        print_queries=print_queries,
+    return run_timed_query(
+        backend,
+        lambda: globals()[function_name](
+            connection,
+            sql,
+            print_queries=print_queries,
+        ),
     )

@@ -15,6 +15,7 @@ from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
 from ...operation_runner import run_connection_operation, tracked_sql_operation
 from ...plans import SqlOperationMetadata, SqlOperationResult
+from ...query_timing import run_timed_query
 from analytics_toolkit.general import time_print
 from .execute_sql import (
     _execute_ch_statement,
@@ -29,7 +30,7 @@ from .models import ExecuteReadOptions
 def execute_read(
     connection_type: str,
     query: str,
-    print_queries: bool = True,
+    print_queries: bool = False,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
     retry_cnt: int = 5,
@@ -156,7 +157,7 @@ def _build_execute_read_options(
 def _execute_read_trino(
     conn: Any,
     statements: list[str],
-    print_queries: bool = True,
+    print_queries: bool = False,
 ) -> pd.DataFrame:
     time_print(
         f"Executing {max(len(statements) - 1, 0)} setup statement(s) "
@@ -182,7 +183,7 @@ def _execute_read_trino(
 def _execute_read_gp(
     conn: Any,
     statements: list[str],
-    print_queries: bool = True,
+    print_queries: bool = False,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
 ) -> pd.DataFrame:
@@ -197,11 +198,14 @@ def _execute_read_gp(
         if setup_statements and not gp_break_query:
             setup_sql = ";\n".join(setup_statements)
             _maybe_print_query(setup_sql, print_queries, split_preview=False)
-            cursor.execute(setup_sql)
+            run_timed_query("gp", lambda: cursor.execute(setup_sql))
         else:
             for statement in _iterate_statements_with_progress(setup_statements, "gp"):
                 _maybe_print_query(statement, print_queries, split_preview=True)
-                cursor.execute(statement)
+                run_timed_query(
+                    "gp",
+                    lambda statement=statement: cursor.execute(statement),
+                )
                 if gp_commit_each_statement:
                     conn.commit()
                     should_commit_at_end = False
@@ -220,7 +224,7 @@ def _execute_read_gp(
 def _execute_read_ch(
     client: Any,
     statements: list[str],
-    print_queries: bool = True,
+    print_queries: bool = False,
 ) -> pd.DataFrame:
     time_print(
         f"Executing {max(len(statements) - 1, 0)} setup statement(s) "
@@ -235,7 +239,7 @@ def _execute_read_ch(
             print_queries=print_queries,
         )
         _maybe_print_query(statements[-1], print_queries, split_preview=True)
-        return client.query_df(statements[-1])
+        return run_timed_query("ch", lambda: client.query_df(statements[-1]))
     except Exception:
         time_print(f"SQL failed on ch:\n{statements[-1]}")
         raise
@@ -251,7 +255,10 @@ def _execute_setup_statements(
 ) -> None:
     for statement in _iterate_statements_with_progress(statements, connection_type):
         _maybe_print_query(statement, print_queries, split_preview=True)
-        execute_statement(executor, statement)
+        run_timed_query(
+            connection_type,
+            lambda statement=statement: execute_statement(executor, statement),
+        )
 
 
 def _read_dbapi_cursor(
@@ -262,10 +269,14 @@ def _read_dbapi_cursor(
 ) -> pd.DataFrame:
     time_print(f"Reading DataFrame from {connection_type}")
     _maybe_print_query(query, print_queries, split_preview=True)
-    cursor.execute(query)
-    columns = [column[0] for column in cursor.description or []]
-    rows = cursor.fetchall()
-    return pd.DataFrame(rows, columns=columns)
+
+    def read_query() -> pd.DataFrame:
+        cursor.execute(query)
+        columns = [column[0] for column in cursor.description or []]
+        rows = cursor.fetchall()
+        return pd.DataFrame(rows, columns=columns)
+
+    return run_timed_query(connection_type, read_query)
 
 
 _EXECUTE_READ_FUNCTION_NAMES = {

@@ -137,7 +137,7 @@ def test_load_df_rejects_invalid_gp_insert_chunk_size() -> None:
         )
 
 
-def test_read_sql_prefixes_query_label(monkeypatch) -> None:
+def test_read_sql_prefixes_query_label(monkeypatch, capsys) -> None:
     connection = FakeDbapiConnection(
         rows=[(1,)],
         description=[("value",)],
@@ -147,13 +147,15 @@ def test_read_sql_prefixes_query_label(monkeypatch) -> None:
     result = read_sql_module.read_sql(
         "gp",
         "select 1 as value",
-        print_queries=False,
         retry_cnt=1,
         timeout_increment=0,
         query_label="unit-test",
     )
 
+    output = capsys.readouterr().out
     assert result["value"].tolist() == [1]
+    assert "Executing query:" not in output
+    assert "SQL query on gp finished: success in " in output
     assert connection.executed[0].startswith(
         "/* analytics_toolkit query_label=unit-test */"
     )
@@ -206,6 +208,7 @@ def test_execute_sql_dry_run_does_not_open_connection(monkeypatch) -> None:
         "execute",
         "execute",
     ]
+    assert plan.options["print_queries"] is False
     assert "random_sleep_seconds" not in plan.options
     assert plan.metadata.statement_count == 2
     assert sum("query_label=dry-exec" in sql for sql in plan.sqls) == 1
@@ -229,6 +232,29 @@ def test_execute_sql_trino_executes_split_statements_in_order(monkeypatch) -> No
 
     assert connection.executed == ["select 1", "select 2", "select 3"]
     assert connection.close_calls == 1
+
+
+def test_execute_sql_logs_elapsed_for_each_statement_by_default(
+    monkeypatch,
+    capsys,
+) -> None:
+    connection = FakeDbapiConnection()
+    monkeypatch.setattr(
+        execute_sql_module,
+        "get_sql_connection",
+        lambda key: connection,
+    )
+
+    execute_sql_module.execute_sql(
+        "trino",
+        "select 1; select 2",
+        retry_cnt=1,
+        timeout_increment=0,
+    )
+
+    output = capsys.readouterr().out
+    assert "Executing query:" not in output
+    assert output.count("SQL query on trino finished: success in ") == 2
 
 
 def test_execute_sql_clickhouse_executes_split_statements_in_order(monkeypatch) -> None:
