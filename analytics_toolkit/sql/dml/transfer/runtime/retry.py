@@ -62,6 +62,7 @@ def is_non_retryable_sql_error(exc: Exception) -> bool:
         "InvalidColumnReference",
         "InvalidTableDefinition",
         "InvalidSchemaName",
+        "GroupingError",
         "InsufficientPrivilege",
         "SchemaNotFoundError",
         "TableNotFoundError",
@@ -75,6 +76,7 @@ def is_non_retryable_sql_error(exc: Exception) -> bool:
         "42P01",  # undefined_table
         "42703",  # undefined_column
         "42883",  # undefined_function
+        "42803",  # grouping_error
         "3F000",  # invalid_schema_name
         "42P07",  # duplicate_table
         "42501",  # insufficient_privilege
@@ -122,6 +124,7 @@ _NON_RETRYABLE_MESSAGE_PATTERNS = (
     "no such table",
     "undefined table",
     "undefined_table",
+    "must appear in the group by clause",
     "must be owner of relation",
     "must be owner of table",
     "permission denied",

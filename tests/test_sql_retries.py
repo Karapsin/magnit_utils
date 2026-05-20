@@ -44,6 +44,10 @@ class InsufficientPrivilege(Exception):
     pgcode = "42501"
 
 
+class GroupingError(Exception):
+    pgcode = "42803"
+
+
 def test_read_sql_retries_whole_flow_with_fresh_gp_connection(monkeypatch) -> None:
     first_connection = FakeConnection("first")
     second_connection = FakeConnection("second")
@@ -316,6 +320,31 @@ def test_run_with_retry_does_not_retry_insufficient_privilege() -> None:
         pass
     else:
         raise AssertionError("Expected insufficient-privilege error to be raised.")
+
+    assert attempts == [1]
+
+
+def test_run_with_retry_does_not_retry_grouping_error() -> None:
+    attempts: list[int] = []
+
+    def operation(attempt: int) -> None:
+        attempts.append(attempt)
+        raise GroupingError(
+            'column "source.contact_id" must appear in the GROUP BY clause '
+            "or be used in an aggregate function"
+        )
+
+    try:
+        retry_module.run_with_retry(
+            operation_name="reading query on gp (gp)",
+            retry_cnt=3,
+            timeout_increment=0,
+            operation=operation,
+        )
+    except GroupingError:
+        pass
+    else:
+        raise AssertionError("Expected grouping error to be raised.")
 
     assert attempts == [1]
 
