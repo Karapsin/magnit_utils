@@ -122,6 +122,7 @@ def ch_full_table_move(
 
     connection = get_sql_connection(config.connection_key)
     metadata = SqlOperationMetadata(query_label=options.query_label)
+    preview_sql = _ch_full_table_move_preview_sql(options)
     try:
         with tracked_sql_operation(
             metadata=metadata,
@@ -130,6 +131,7 @@ def ch_full_table_move(
             backend=options.backend,
             phase="move_table",
             query_label=options.query_label,
+            preview_sql=preview_sql,
         ):
             time_print(
                 f"Moving ClickHouse table {source_table} to "
@@ -229,6 +231,13 @@ def ch_full_table_move(
         connection.close()
     if options.return_metadata:
         return SqlOperationResult(rows=None, metadata=metadata)
+    return None
+
+
+def _ch_full_table_move_preview_sql(options: ChFullTableMoveOptions) -> str | None:
+    for statement in build_ch_full_table_move_plan(options).statements:
+        if statement.phase != "inspect":
+            return statement.sql
     return None
 
 

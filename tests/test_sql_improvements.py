@@ -21,6 +21,9 @@ execute_read_module = importlib.import_module(
 transfer_api_module = importlib.import_module(
     "analytics_toolkit.sql.dml.transfer.flow.api"
 )
+ddl_create_table_module = importlib.import_module(
+    "analytics_toolkit.sql.ddl.create_sql_table"
+)
 create_table_module = importlib.import_module(
     "analytics_toolkit.sql.dml.table.create_table_from_sql"
 )
@@ -29,6 +32,9 @@ ch_ctas_module = importlib.import_module(
 )
 ch_move_module = importlib.import_module(
     "analytics_toolkit.sql.dml.table.ch_full_table_move"
+)
+operation_runner_module = importlib.import_module(
+    "analytics_toolkit.sql.operation_runner"
 )
 cli_module = importlib.import_module("analytics_toolkit.cli")
 
@@ -53,6 +59,24 @@ def test_table_identifier_preserves_qualified_parts_and_quotes() -> None:
         'sandbox."Target Table_stage"'
     )
     assert identifier.render_quoted("ch") == "`sandbox`.`Target Table`"
+
+
+def test_tracked_sql_operation_logs_finished_preview(capsys) -> None:
+    with operation_runner_module.tracked_sql_operation(
+        operation_name="unit_operation",
+        alias="gp",
+        backend="gp",
+        phase="phase",
+        preview_sql="\n\n  select * from source_table\nwhere id = 1",
+    ):
+        pass
+
+    output = capsys.readouterr().out
+    assert (
+        "Finished SQL operation unit_operation on phase for gp (gp): success in "
+        in output
+    )
+    assert "Finished SQL statement:\nselect * from source_table" in output
 
 
 def test_load_df_dry_run_returns_ordered_labeled_plan() -> None:
@@ -156,6 +180,10 @@ def test_read_sql_prefixes_query_label(monkeypatch, capsys) -> None:
     assert result["value"].tolist() == [1]
     assert "Executing query:" not in output
     assert "SQL query on gp finished: success in " in output
+    assert (
+        "Finished SQL statement:\n"
+        "/* analytics_toolkit query_label=unit-test */"
+    ) in output
     assert connection.executed[0].startswith(
         "/* analytics_toolkit query_label=unit-test */"
     )
@@ -255,6 +283,7 @@ def test_execute_sql_logs_elapsed_for_each_statement_by_default(
     output = capsys.readouterr().out
     assert "Executing query:" not in output
     assert output.count("SQL query on trino finished: success in ") == 2
+    assert "Finished SQL statement:\nselect 1; select 2" in output
 
 
 def test_execute_sql_clickhouse_executes_split_statements_in_order(monkeypatch) -> None:
@@ -373,6 +402,53 @@ def test_transfer_dry_run_includes_source_stage_and_target_steps() -> None:
     assert plan.statements[0].phase == "read_source"
     assert "query_label=copy-target" in plan.statements[0].sql
     assert plan.statements[-1].phase == "drop_stage"
+
+
+def test_transfer_table_logs_source_sql_preview(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        transfer_api_module,
+        "run_transfer_attempt",
+        lambda **kwargs: 3,
+    )
+
+    result = transfer_api_module.transfer_table(
+        from_db="gp",
+        to_db="trino",
+        from_sql="\n\nselect id from source_table",
+        to_table="sandbox.target",
+        retry_cnt=1,
+        timeout_increment=0,
+        full_retry_cnt=1,
+        full_timeout_increment=0,
+        progress=False,
+    )
+
+    output = capsys.readouterr().out
+    assert result == 3
+    assert (
+        "Finished SQL operation transfer_table on transfer for trino (trino): "
+        "success in "
+    ) in output
+    assert "Finished SQL statement:\nselect id from source_table" in output
+
+
+def test_create_sql_table_logs_generated_sql_preview(capsys) -> None:
+    connection = FakeDbapiConnection()
+
+    ddl_create_table_module.create_sql_table(
+        "gp",
+        connection,
+        "sandbox.created_table",
+        pd.DataFrame({"id": [1]}),
+    )
+
+    output = capsys.readouterr().out
+    assert (
+        "Finished SQL operation create_sql_table on create_target for gp (gp): "
+        "success in "
+    ) in output
+    assert "Finished SQL statement:\nCREATE TABLE sandbox.created_table" in output
+    assert connection.executed[0].startswith("CREATE TABLE sandbox.created_table")
 
 
 def test_load_df_clickhouse_dry_run_preserves_lifecycle_order_and_cluster() -> None:

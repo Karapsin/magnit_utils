@@ -89,13 +89,16 @@ work can continue until that function exits. Successful task results are
 preserved, except `None` results are reported as `"success"`. With
 `fail_fast=False`, failed tasks are reported under their task names as the error
 text. A `tqdm` progress bar is shown by default; pass `progress=False` to
-disable it.
+disable it. Built-in `load_df` and `transfer` tasks run with their row-level
+progress bars suppressed inside `async_sql`, so the async task bar is the only
+progress bar shown for a batch.
 
 SQL query text is not printed by default. Pass `print_queries=True` to
 `read_sql`, `execute_sql`, `execute_read`, or `gp_cancel_all_running_queries`
 when you want each statement echoed before execution. `read_sql`,
 `execute_sql`, and `execute_read` still log elapsed time after every executed
-query or statement.
+query or statement. Public SQL operations also log the first non-empty line of
+the representative SQL after the operation-finished status line.
 
 Pass `start_comment` to prepend a raw SQL prefix to every `read`, `execute`,
 `execute_read`, and `transfer` task query. For `transfer`, the prefix is applied

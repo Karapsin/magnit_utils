@@ -101,6 +101,7 @@ def create_sql_table(
         backend=options.backend,
         phase="create_target",
         query_label=options.query_label,
+        preview_sql=create_sqls[0] if create_sqls else None,
     ):
         get_backend_adapter(options.backend).execute_commands(options.connection, create_sqls)
         if options.backend == "ch":

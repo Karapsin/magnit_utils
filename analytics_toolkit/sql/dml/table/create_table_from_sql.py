@@ -146,6 +146,7 @@ def create_table_from_sql(
             backend=options.target_backend,
             phase="create_or_insert",
             query_label=options.query_label,
+            preview_sql=options.source_sql,
         ):
             source_connection = get_sql_connection(source_config.connection_key)
             target_connection = (

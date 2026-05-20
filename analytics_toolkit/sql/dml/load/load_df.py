@@ -113,6 +113,7 @@ def load_df(
         source_rows=len(df),
         query_label=options.query_label,
     )
+    preview_sql = _load_df_preview_sql(options, df)
 
     def operation(
         connection_ref: dict[str, Any],
@@ -126,6 +127,7 @@ def load_df(
             phase="load",
             retry_attempt=attempt,
             query_label=options.query_label,
+            preview_sql=preview_sql,
         ):
             state_holder["state"] = None
             state = _initialize_load_state(options, connection_ref["connection"])
@@ -644,6 +646,13 @@ def build_load_df_plan(options: LoadOptions, df: pd.DataFrame) -> SqlPlan:
         query_label=options.query_label,
     )
     return plan
+
+
+def _load_df_preview_sql(options: LoadOptions, df: pd.DataFrame) -> str | None:
+    plan = build_load_df_plan(options, df)
+    if not plan.sqls:
+        return None
+    return plan.sqls[0]
 
 
 def _build_dataframe_insert_placeholder(

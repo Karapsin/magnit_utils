@@ -474,14 +474,20 @@ def _validate_progress(progress: bool) -> None:
 
 
 def _run_sync_task(task_type: str, kwargs: dict[str, Any]) -> Any:
+    task_kwargs = dict(kwargs)
+    if task_type in {"load_df", "transfer"}:
+        if "progress" in task_kwargs:
+            _validate_progress(task_kwargs["progress"])
+        task_kwargs["progress"] = False
+
     if task_type == "read":
-        return read_sql(**kwargs)
+        return read_sql(**task_kwargs)
     if task_type == "execute":
-        return execute_sql(**kwargs)
+        return execute_sql(**task_kwargs)
     if task_type == "execute_read":
-        return execute_read(**kwargs)
+        return execute_read(**task_kwargs)
     if task_type == "load_df":
-        return load_df(**kwargs)
+        return load_df(**task_kwargs)
     if task_type == "transfer":
-        return transfer_table(**kwargs)
+        return transfer_table(**task_kwargs)
     raise ValueError(f"Unsupported task type: {task_type!r}.")

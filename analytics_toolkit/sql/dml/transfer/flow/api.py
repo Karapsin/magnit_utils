@@ -118,6 +118,7 @@ def transfer_table(
             phase="transfer",
             retry_attempt=attempt,
             query_label=options.query_label,
+            preview_sql=options.source_sql,
         ):
             if options.to_db_backend == "gp":
                 return run_transfer_attempt(

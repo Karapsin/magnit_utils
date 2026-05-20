@@ -40,6 +40,10 @@ class FakeTrinoSyntaxError(Exception):
     error_name = "SYNTAX_ERROR"
 
 
+class InsufficientPrivilege(Exception):
+    pgcode = "42501"
+
+
 def test_read_sql_retries_whole_flow_with_fresh_gp_connection(monkeypatch) -> None:
     first_connection = FakeConnection("first")
     second_connection = FakeConnection("second")
@@ -288,6 +292,28 @@ def test_run_with_retry_does_not_retry_trino_syntax_error() -> None:
         pass
     else:
         raise AssertionError("Expected syntax error to be raised.")
+
+    assert attempts == [1]
+
+
+def test_run_with_retry_does_not_retry_insufficient_privilege() -> None:
+    attempts: list[int] = []
+
+    def operation(attempt: int) -> None:
+        attempts.append(attempt)
+        raise InsufficientPrivilege("must be owner of relation sandbox.target")
+
+    try:
+        retry_module.run_with_retry(
+            operation_name="dropping target table on gp",
+            retry_cnt=3,
+            timeout_increment=0,
+            operation=operation,
+        )
+    except InsufficientPrivilege:
+        pass
+    else:
+        raise AssertionError("Expected insufficient-privilege error to be raised.")
 
     assert attempts == [1]
 

@@ -63,6 +63,7 @@ def execute_read(
             phase="execute_read",
             retry_attempt=attempt,
             query_label=options.query_label,
+            preview_sql="\n".join(options.statements),
         ):
             result = _execute_read_backend(
                 options.backend,

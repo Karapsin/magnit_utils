@@ -135,6 +135,7 @@ def _read_sql_impl(
             phase="read",
             retry_attempt=attempt,
             query_label=options.query_label,
+            preview_sql=options.sql,
         ):
             result = _read_backend(
                 options.backend,

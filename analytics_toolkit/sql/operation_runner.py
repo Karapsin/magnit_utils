@@ -25,6 +25,7 @@ def tracked_sql_operation(
     phase: str,
     retry_attempt: int | None = None,
     query_label: str | None = None,
+    preview_sql: str | None = None,
 ) -> Any:
     """Record elapsed time and visible status messages for SQL operations."""
     operation_metadata = metadata or SqlOperationMetadata()
@@ -57,6 +58,9 @@ def tracked_sql_operation(
             f"Finished SQL operation {label}: {status} "
             f"in {operation_metadata.elapsed_seconds:.3f}s"
         )
+        preview_line = _first_non_empty_sql_line(preview_sql)
+        if preview_line is not None:
+            time_print(f"Finished SQL statement:\n{preview_line}")
 
 
 def merge_operation_metadata(
@@ -161,6 +165,16 @@ def run_annotated_once(
 def _close_connection(connection_ref: ConnectionRef, connection_key: str) -> None:
     time_print(f"Closing {connection_key} connection")
     connection_ref["connection"].close()
+
+
+def _first_non_empty_sql_line(sql: str | None) -> str | None:
+    if sql is None:
+        return None
+    for line in str(sql).splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
 
 
 def _run_with_retry(**kwargs: Any) -> Any:

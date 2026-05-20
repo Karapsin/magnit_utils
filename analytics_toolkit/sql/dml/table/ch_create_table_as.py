@@ -117,6 +117,7 @@ def ch_create_table_as(
             backend=options.backend,
             phase="create_target",
             query_label=options.query_label,
+            preview_sql=options.query_sql,
         ):
             target_shard_table = build_ch_shard_table_name(options.target_table)
             time_print(

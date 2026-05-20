@@ -134,6 +134,7 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
         "destination_table": "sandbox.batch",
         "append": True,
         "ch_order_by": ["id"],
+        "progress": False,
     }
     assert calls_by_type["transfer"] == {
         "from_db": "gp",
@@ -142,7 +143,56 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
         "to_table": "sandbox.copy",
         "batch_size": 10,
         "estimate_total_rows": True,
+        "progress": False,
     }
+
+
+def test_async_sql_suppresses_builtin_load_and_transfer_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, dict[str, Any]] = {}
+    df = pd.DataFrame({"id": [1]})
+
+    def fake_load_df(**kwargs: Any) -> int:
+        calls["load_df"] = kwargs
+        return 1
+
+    def fake_transfer_table(**kwargs: Any) -> int:
+        calls["transfer"] = kwargs
+        return 2
+
+    monkeypatch.setattr(async_module, "load_df", fake_load_df)
+    monkeypatch.setattr(async_module, "transfer_table", fake_transfer_table)
+
+    load_spec = {
+        "name": "load_batch",
+        "type": "load_df",
+        "connection_type": "gp",
+        "destination_table": "sandbox.batch",
+        "df": df,
+        "progress": True,
+    }
+    transfer_spec = {
+        "name": "copy_table",
+        "type": "transfer",
+        "from_db": "gp",
+        "to_db": "trino",
+        "from_sql": "select * from source",
+        "to_table": "sandbox.copy",
+        "progress": True,
+    }
+
+    result = async_module.async_sql(
+        [load_spec, transfer_spec],
+        concurrency=1,
+        progress=False,
+    )
+
+    assert result == {"load_batch": 1, "copy_table": 2}
+    assert calls["load_df"]["progress"] is False
+    assert calls["transfer"]["progress"] is False
+    assert load_spec["progress"] is True
+    assert transfer_spec["progress"] is True
 
 
 def test_async_sql_start_comment_prefixes_sql_fields(
@@ -400,6 +450,7 @@ def test_async_sql_start_comment_does_not_change_load_df_or_pipeline(
     assert {key: value for key, value in load_kwargs.items() if key != "df"} == {
         "connection_type": "ch",
         "destination_table": "sandbox.batch",
+        "progress": False,
     }
 
 
