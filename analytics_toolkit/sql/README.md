@@ -66,7 +66,9 @@ PostgreSQL/Greenplum undefined objects are not retried.
 data loading. Pass `progress=False` to silence those bars. `dry_run=True` and
 `return_sql=True` return plans without creating progress bars. Transfer row
 progress is indeterminate by default; pass `estimate_total_rows=True` to use a
-best-effort backend planner estimate as the progress total.
+best-effort backend planner estimate as the progress total. `transfer_table`
+formats progress row counts with underscore digit grouping, for example
+`1_722_355row` or `1_722_355/2_000_000`.
 
 `execute_sql` and `execute_read` split multi-statement SQL for Trino and
 ClickHouse and submit each statement sequentially; the next statement is sent

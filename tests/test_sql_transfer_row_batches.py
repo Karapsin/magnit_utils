@@ -101,6 +101,61 @@ class StaticClickHouseClient:
         return StaticClickHouseResult(self.rows)
 
 
+class RenderingFakeTqdm:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.total = kwargs["total"]
+        self.n = 0
+        self.rendered: list[str] = []
+
+    @property
+    def format_dict(self) -> dict[str, Any]:
+        desc = self.kwargs["desc"]
+        return {
+            "n": self.n,
+            "total": self.total,
+            "desc": desc,
+            "unit": self.kwargs["unit"],
+            "elapsed": "00:00",
+            "remaining": "00:02",
+            "rate_fmt": "14087.46row/s",
+            "postfix": "",
+            "l_bar": f"{desc}:  86%|",
+            "bar": "########",
+        }
+
+    def update(self, value: int) -> None:
+        self.n += value
+        if not self.kwargs["disable"]:
+            self.rendered.append(self.kwargs["bar_format"].format(**self.format_dict))
+
+
+def capture_rendering_progress_bars(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    progress_bars: list[Any] = []
+
+    class CapturingTqdm(RenderingFakeTqdm):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            progress_bars.append(self)
+
+    monkeypatch.setattr(attempt_module, "tqdm", CapturingTqdm)
+    return progress_bars
+
+
+def make_progress_options(**overrides: Any) -> Any:
+    values = {
+        "from_db_key": "gp",
+        "from_db_backend": "gp",
+        "to_db_key": "gp_sandbox",
+        "to_db_backend": "gp",
+        "source_sql": "select id from source_table",
+        "target_table": "sandbox.target",
+        "batch_size": 2,
+    }
+    values.update(overrides)
+    return models_module.TransferOptions(**values)
+
+
 def test_adaptive_batch_sizer_grows_shrinks_caps_floors_and_can_disable() -> None:
     sizer = models_module.AdaptiveBatchSizer(
         enabled=True,
@@ -322,6 +377,7 @@ def test_load_stage_batches_updates_progress_bar(monkeypatch) -> None:
         "desc": "transfer_table gp_sandbox.sandbox.target",
         "unit": "row",
         "disable": False,
+        "bar_format": attempt_module._TRANSFER_PROGRESS_UNKNOWN_TOTAL_FORMAT,
     }
     assert progress_bars[0].updates == [2, 1]
     assert progress_bars[0].closed is True
@@ -401,6 +457,10 @@ def test_load_stage_batches_estimated_total_sets_progress_bar_total(
 
     assert total_rows == 3
     assert progress_bars[0].kwargs["total"] == 3
+    assert (
+        progress_bars[0].kwargs["bar_format"]
+        == attempt_module._TRANSFER_PROGRESS_TOTAL_FORMAT
+    )
     assert progress_bars[0].updates == [2, 1]
     assert progress_bars[0].closed is True
 
@@ -562,6 +622,46 @@ def test_load_stage_batches_progress_false_disables_bar(monkeypatch) -> None:
     assert progress_bars[0].kwargs["disable"] is True
     assert progress_bars[0].updates == [2]
     assert progress_bars[0].closed is True
+
+
+def test_transfer_progress_bar_formats_unknown_total_counts(monkeypatch) -> None:
+    progress_bars = capture_rendering_progress_bars(monkeypatch)
+
+    options = make_progress_options()
+    progress_bar = attempt_module._make_transfer_progress_bar(options, total=None)
+    progress_bar.update(1_722_355)
+
+    assert progress_bars[0].rendered == [
+        "transfer_table gp_sandbox.sandbox.target: "
+        "1_722_355row [00:00, 14087.46row/s]"
+    ]
+
+
+def test_transfer_progress_bar_formats_estimated_total_counts(monkeypatch) -> None:
+    progress_bars = capture_rendering_progress_bars(monkeypatch)
+
+    options = make_progress_options()
+    progress_bar = attempt_module._make_transfer_progress_bar(
+        options,
+        total=2_000_000,
+    )
+    progress_bar.update(1_722_355)
+
+    assert progress_bars[0].rendered == [
+        "transfer_table gp_sandbox.sandbox.target:  86%|########| "
+        "1_722_355/2_000_000 [00:00<00:02, 14087.46row/s]"
+    ]
+
+
+def test_transfer_progress_bar_progress_false_disables_output(monkeypatch) -> None:
+    progress_bars = capture_rendering_progress_bars(monkeypatch)
+
+    options = make_progress_options(progress=False)
+    progress_bar = attempt_module._make_transfer_progress_bar(options, total=None)
+    progress_bar.update(1_722_355)
+
+    assert progress_bars[0].kwargs["disable"] is True
+    assert progress_bars[0].rendered == []
 
 
 @pytest.mark.parametrize("progress", [None, 0, 1, "yes"])

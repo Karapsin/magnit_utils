@@ -20,6 +20,14 @@ from ..io.source import iter_source_batches
 from ..schema import inspect_source_query_schema, map_source_schema_to_target
 from .stage import create_stage_state, initialize_stage_for_first_batch
 
+_TRANSFER_PROGRESS_UNKNOWN_TOTAL_FORMAT = (
+    "{desc}: {n_pretty}{unit} [{elapsed}, {rate_fmt}{postfix}]"
+)
+_TRANSFER_PROGRESS_TOTAL_FORMAT = (
+    "{l_bar}{bar}| {n_pretty}/{total_pretty} "
+    "[{elapsed}<{remaining}, {rate_fmt}{postfix}]"
+)
+
 
 def run_transfer_attempt(
     options: TransferOptions,
@@ -183,9 +191,37 @@ class _ProgressTracker:
 
 
 def _make_transfer_progress_bar(options: TransferOptions, *, total: int | None) -> Any:
-    return tqdm(
+    progress_cls = _make_transfer_progress_bar_class(tqdm)
+    bar_format = (
+        _TRANSFER_PROGRESS_TOTAL_FORMAT
+        if total is not None
+        else _TRANSFER_PROGRESS_UNKNOWN_TOTAL_FORMAT
+    )
+    return progress_cls(
         total=total,
         desc=f"transfer_table {options.to_db_key}.{options.target_table}",
         unit="row",
         disable=not options.progress,
+        bar_format=bar_format,
     )
+
+
+def _make_transfer_progress_bar_class(base_tqdm: Any) -> Any:
+    class _TransferProgressTqdm(base_tqdm):
+        @property
+        def format_dict(self) -> dict[str, Any]:
+            format_dict = super().format_dict
+            total = format_dict.get("total")
+            format_dict["n_pretty"] = _format_transfer_progress_count(
+                format_dict.get("n", self.n)
+            )
+            format_dict["total_pretty"] = (
+                "?" if total is None else _format_transfer_progress_count(total)
+            )
+            return format_dict
+
+    return _TransferProgressTqdm
+
+
+def _format_transfer_progress_count(value: Any) -> str:
+    return f"{value:_}"
