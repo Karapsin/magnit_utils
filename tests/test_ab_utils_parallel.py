@@ -177,6 +177,105 @@ def test_parallel_compute_metrics_limits_concurrency(
     assert max_active_tasks == 2
 
 
+def test_parallel_compute_metrics_soft_cap_limits_worker_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = threading.Lock()
+    active_tasks = 0
+    max_active_tasks = 0
+
+    def fake_compute_test_metrics(**kwargs: Any) -> pd.DataFrame:
+        nonlocal active_tasks, max_active_tasks
+        with lock:
+            active_tasks += 1
+            max_active_tasks = max(max_active_tasks, active_tasks)
+        time.sleep(0.05)
+        with lock:
+            active_tasks -= 1
+        return pd.DataFrame({"metric_name": [kwargs["metric_name"]]})
+
+    monkeypatch.setattr(
+        parallel_module,
+        "compute_test_metrics",
+        fake_compute_test_metrics,
+    )
+
+    tasks = {
+        f"task_{index}": {"df": pd.DataFrame(), "metric_name": f"metric_{index}"}
+        for index in range(6)
+    }
+
+    result = parallel_module.parallel_compute_metrics(
+        tasks,
+        concurrency=6,
+        soft_concurrency_cap=2,
+        progress=False,
+    )
+
+    assert list(result) == [f"task_{index}" for index in range(6)]
+    assert max_active_tasks == 2
+
+
+def test_parallel_compute_metrics_hard_cap_rejects_unthrottled_concurrency() -> None:
+    tasks = {
+        f"task_{index}": {"df": pd.DataFrame()}
+        for index in range(11)
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "effective concurrency exceeds hard_concurrency_cap.*"
+            "soft_concurrency_cap"
+        ),
+    ):
+        parallel_module.parallel_compute_metrics(
+            tasks,
+            concurrency=11,
+            progress=False,
+        )
+
+
+def test_parallel_compute_metrics_lower_soft_cap_avoids_hard_cap_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = threading.Lock()
+    active_tasks = 0
+    max_active_tasks = 0
+
+    def fake_compute_test_metrics(**kwargs: Any) -> pd.DataFrame:
+        nonlocal active_tasks, max_active_tasks
+        with lock:
+            active_tasks += 1
+            max_active_tasks = max(max_active_tasks, active_tasks)
+        time.sleep(0.05)
+        with lock:
+            active_tasks -= 1
+        return pd.DataFrame({"metric_name": [kwargs["metric_name"]]})
+
+    monkeypatch.setattr(
+        parallel_module,
+        "compute_test_metrics",
+        fake_compute_test_metrics,
+    )
+
+    tasks = {
+        f"task_{index}": {"df": pd.DataFrame(), "metric_name": f"metric_{index}"}
+        for index in range(11)
+    }
+
+    result = parallel_module.parallel_compute_metrics(
+        tasks,
+        concurrency=11,
+        soft_concurrency_cap=5,
+        hard_concurrency_cap=10,
+        progress=False,
+    )
+
+    assert list(result) == [f"task_{index}" for index in range(11)]
+    assert max_active_tasks == 5
+
+
 def test_parallel_compute_metrics_updates_progress_bar(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -357,6 +456,30 @@ def test_parallel_compute_metrics_validates_concurrency(concurrency: Any) -> Non
         )
 
 
+@pytest.mark.parametrize("soft_concurrency_cap", [0, -1, True, 1.5])
+def test_parallel_compute_metrics_validates_soft_concurrency_cap(
+    soft_concurrency_cap: Any,
+) -> None:
+    with pytest.raises(ValueError, match="soft_concurrency_cap"):
+        parallel_module.parallel_compute_metrics(
+            {"task": {"df": pd.DataFrame()}},
+            soft_concurrency_cap=soft_concurrency_cap,
+            progress=False,
+        )
+
+
+@pytest.mark.parametrize("hard_concurrency_cap", [0, -1, True, 1.5])
+def test_parallel_compute_metrics_validates_hard_concurrency_cap(
+    hard_concurrency_cap: Any,
+) -> None:
+    with pytest.raises(ValueError, match="hard_concurrency_cap"):
+        parallel_module.parallel_compute_metrics(
+            {"task": {"df": pd.DataFrame()}},
+            hard_concurrency_cap=hard_concurrency_cap,
+            progress=False,
+        )
+
+
 @pytest.mark.parametrize("progress", [None, 0, 1, "yes"])
 def test_parallel_compute_metrics_validates_progress(progress: Any) -> None:
     with pytest.raises(ValueError, match="progress"):
@@ -491,6 +614,66 @@ def test_parallel_compute_metrics_from_sql_loads_sql_and_delegates(
     assert without_pre == {
         "labels": {"segment": "segment2"},
         "multiple_comparisons_adjustment": True,
+    }
+
+
+def test_parallel_compute_metrics_from_sql_passes_concurrency_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    experiment_df = pd.DataFrame({"user_id": [1]})
+    async_calls: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+    compute_calls: list[tuple[dict[str, dict[str, Any]], dict[str, Any]]] = []
+
+    def fake_async_sql(
+        tasks: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, pd.DataFrame]:
+        async_calls.append((tasks, kwargs))
+        return {"segment:sql": experiment_df}
+
+    def fake_parallel_compute_metrics(
+        tasks: dict[str, dict[str, Any]],
+        **kwargs: Any,
+    ) -> dict[str, pd.DataFrame]:
+        compute_calls.append((tasks, kwargs))
+        return {"segment": pd.DataFrame({"task": ["segment"]})}
+
+    monkeypatch.setattr(parallel_module, "async_sql", fake_async_sql)
+    monkeypatch.setattr(
+        parallel_module,
+        "parallel_compute_metrics",
+        fake_parallel_compute_metrics,
+    )
+
+    result = parallel_module.parallel_compute_metrics_from_sql(
+        {
+            "segment": {
+                "sql": "select * from experiment",
+            },
+        },
+        db="analytics_prod",
+        concurrency=6,
+        soft_concurrency_cap=2,
+        hard_concurrency_cap=7,
+        progress=False,
+    )
+
+    pd.testing.assert_frame_equal(result["segment"], pd.DataFrame({"task": ["segment"]}))
+    assert len(async_calls) == 1
+    assert async_calls[0][1] == {
+        "concurrency": 6,
+        "fail_fast": True,
+        "progress": False,
+        "soft_concurrency_cap": 2,
+        "hard_concurrency_cap": 7,
+    }
+    assert len(compute_calls) == 1
+    assert compute_calls[0][1] == {
+        "concurrency": 6,
+        "fail_fast": True,
+        "progress": False,
+        "soft_concurrency_cap": 2,
+        "hard_concurrency_cap": 7,
     }
 
 

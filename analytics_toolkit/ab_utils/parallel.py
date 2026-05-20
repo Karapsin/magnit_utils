@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import contextvars
 from collections.abc import Mapping
+from contextlib import ExitStack
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from threading import Semaphore
 from typing import Any
 
 import pandas as pd
@@ -13,7 +17,19 @@ from analytics_toolkit.sql import async_sql
 from .api import compute_test_metrics
 
 _SQL_DATAFRAME_FIELDS = frozenset({"df", "pre_exp_df", "pre_exp_metrics_df"})
+_DEFAULT_HARD_CONCURRENCY_CAP = 10
+_CONCURRENCY_STATE: contextvars.ContextVar["_ConcurrencyState | None"] = (
+    contextvars.ContextVar("analytics_toolkit_ab_parallel_concurrency", default=None)
+)
 _MISSING = object()
+
+
+@dataclass(frozen=True)
+class _ConcurrencyState:
+    effective_concurrency: int
+    hard_cap: int
+    soft_cap: int
+    semaphores: tuple[Semaphore, ...]
 
 
 def parallel_compute_metrics(
@@ -21,21 +37,39 @@ def parallel_compute_metrics(
     *,
     concurrency: int = 5,
     fail_fast: bool = True,
+    soft_concurrency_cap: int | None = None,
+    hard_concurrency_cap: int = _DEFAULT_HARD_CONCURRENCY_CAP,
     progress: bool = True,
 ) -> dict[str, pd.DataFrame | str]:
     """Run independent ``compute_test_metrics`` tasks concurrently."""
     task_defs = _validate_tasks(tasks)
     _validate_concurrency(concurrency)
+    _validate_optional_soft_concurrency_cap(soft_concurrency_cap)
+    _validate_hard_concurrency_cap(hard_concurrency_cap)
     _validate_progress(progress)
+    state = _build_concurrency_state(
+        concurrency=concurrency,
+        soft_concurrency_cap=soft_concurrency_cap,
+        hard_concurrency_cap=hard_concurrency_cap,
+    )
+    reset_token = _CONCURRENCY_STATE.set(state)
 
     results_by_index: dict[int, pd.DataFrame | str] = {}
-    executor = ThreadPoolExecutor(max_workers=concurrency)
+    executor: ThreadPoolExecutor | None = None
     shutdown_called = False
-    progress_bar = _make_progress_bar(total=len(task_defs), progress=progress)
+    progress_bar: Any | None = None
 
     try:
+        executor = ThreadPoolExecutor(max_workers=min(concurrency, state.soft_cap))
+        progress_bar = _make_progress_bar(total=len(task_defs), progress=progress)
         future_to_index: dict[Future[pd.DataFrame], int] = {
-            executor.submit(_run_task, kwargs, labels): index
+            executor.submit(
+                contextvars.copy_context().run,
+                _run_task_with_concurrency_state,
+                state.semaphores,
+                kwargs,
+                labels,
+            ): index
             for index, (_name, kwargs, labels) in enumerate(task_defs)
         }
 
@@ -60,9 +94,11 @@ def parallel_compute_metrics(
             for index, (name, _kwargs, _labels) in enumerate(task_defs)
         }
     finally:
-        progress_bar.close()
-        if not shutdown_called:
+        if progress_bar is not None:
+            progress_bar.close()
+        if executor is not None and not shutdown_called:
             executor.shutdown(wait=True, cancel_futures=True)
+        _CONCURRENCY_STATE.reset(reset_token)
 
 
 def parallel_compute_metrics_from_sql(
@@ -72,12 +108,16 @@ def parallel_compute_metrics_from_sql(
     concurrency: int = 5,
     fail_fast: bool = True,
     start_comment: str | None = None,
+    soft_concurrency_cap: int | None = None,
+    hard_concurrency_cap: int = _DEFAULT_HARD_CONCURRENCY_CAP,
     progress: bool = True,
 ) -> dict[str, pd.DataFrame | str]:
     """Load SQL-backed task dataframes, then run ``parallel_compute_metrics``."""
     _validate_start_comment("start_comment", start_comment)
     task_defs = _validate_sql_tasks(tasks)
     _validate_concurrency(concurrency)
+    _validate_optional_soft_concurrency_cap(soft_concurrency_cap)
+    _validate_hard_concurrency_cap(hard_concurrency_cap)
     _validate_progress(progress)
 
     sql_tasks: list[dict[str, Any]] = []
@@ -109,6 +149,10 @@ def parallel_compute_metrics_from_sql(
     }
     if start_comment is not None:
         async_kwargs["start_comment"] = start_comment
+    if soft_concurrency_cap is not None:
+        async_kwargs["soft_concurrency_cap"] = soft_concurrency_cap
+    if hard_concurrency_cap != _DEFAULT_HARD_CONCURRENCY_CAP:
+        async_kwargs["hard_concurrency_cap"] = hard_concurrency_cap
 
     sql_results = async_sql(sql_tasks, **async_kwargs)
 
@@ -130,13 +174,18 @@ def parallel_compute_metrics_from_sql(
             metric_kwargs["pre_exp_df"] = pre_exp_df_result
         metric_tasks[name] = metric_kwargs
 
+    metric_kwargs: dict[str, Any] = {
+        "concurrency": concurrency,
+        "fail_fast": fail_fast,
+        "progress": progress,
+    }
+    if soft_concurrency_cap is not None:
+        metric_kwargs["soft_concurrency_cap"] = soft_concurrency_cap
+    if hard_concurrency_cap != _DEFAULT_HARD_CONCURRENCY_CAP:
+        metric_kwargs["hard_concurrency_cap"] = hard_concurrency_cap
+
     metric_results = (
-        parallel_compute_metrics(
-            metric_tasks,
-            concurrency=concurrency,
-            fail_fast=fail_fast,
-            progress=progress,
-        )
+        parallel_compute_metrics(metric_tasks, **metric_kwargs)
         if metric_tasks
         else {}
     )
@@ -154,6 +203,62 @@ def _make_progress_bar(*, total: int, progress: bool) -> Any:
         unit="task",
         disable=not progress,
     )
+
+
+def _build_concurrency_state(
+    *,
+    concurrency: int,
+    soft_concurrency_cap: int | None,
+    hard_concurrency_cap: int,
+) -> _ConcurrencyState:
+    active_state = _CONCURRENCY_STATE.get()
+    if active_state is None:
+        hard_cap = hard_concurrency_cap
+        soft_cap = concurrency if soft_concurrency_cap is None else soft_concurrency_cap
+        semaphores = (Semaphore(soft_cap),)
+        effective_concurrency = concurrency
+    else:
+        hard_cap = active_state.hard_cap
+        if (
+            hard_concurrency_cap != _DEFAULT_HARD_CONCURRENCY_CAP
+            and hard_concurrency_cap >= hard_cap
+        ):
+            hard_cap = hard_concurrency_cap
+
+        soft_cap = active_state.soft_cap
+        semaphores = active_state.semaphores
+        if soft_concurrency_cap is not None and soft_concurrency_cap < soft_cap:
+            soft_cap = soft_concurrency_cap
+            semaphores = (*semaphores, Semaphore(soft_cap))
+
+        effective_concurrency = active_state.effective_concurrency * concurrency
+
+    actual_worker_ceiling = min(effective_concurrency, soft_cap)
+    if actual_worker_ceiling > hard_cap:
+        raise ValueError(
+            "effective concurrency exceeds hard_concurrency_cap "
+            f"({actual_worker_ceiling} > {hard_cap}). Reduce concurrency, set "
+            "soft_concurrency_cap at or below hard_concurrency_cap, or increase "
+            "hard_concurrency_cap."
+        )
+
+    return _ConcurrencyState(
+        effective_concurrency=effective_concurrency,
+        hard_cap=hard_cap,
+        soft_cap=soft_cap,
+        semaphores=semaphores,
+    )
+
+
+def _run_task_with_concurrency_state(
+    semaphores: tuple[Semaphore, ...],
+    kwargs: dict[str, Any],
+    labels: dict[str, Any],
+) -> pd.DataFrame:
+    with ExitStack() as stack:
+        for semaphore in reversed(semaphores):
+            stack.enter_context(semaphore)
+        return _run_task(kwargs, labels)
 
 
 def _run_task(kwargs: dict[str, Any], labels: dict[str, Any]) -> pd.DataFrame:
@@ -314,6 +419,28 @@ def _validate_concurrency(concurrency: int) -> None:
         or concurrency < 1
     ):
         raise ValueError("concurrency must be an integer >= 1.")
+
+
+def _validate_optional_soft_concurrency_cap(
+    soft_concurrency_cap: int | None,
+) -> None:
+    if soft_concurrency_cap is None:
+        return
+    if (
+        not isinstance(soft_concurrency_cap, int)
+        or isinstance(soft_concurrency_cap, bool)
+        or soft_concurrency_cap < 1
+    ):
+        raise ValueError("soft_concurrency_cap must be an integer >= 1.")
+
+
+def _validate_hard_concurrency_cap(hard_concurrency_cap: int) -> None:
+    if (
+        not isinstance(hard_concurrency_cap, int)
+        or isinstance(hard_concurrency_cap, bool)
+        or hard_concurrency_cap < 1
+    ):
+        raise ValueError("hard_concurrency_cap must be an integer >= 1.")
 
 
 def _validate_progress(progress: bool) -> None:

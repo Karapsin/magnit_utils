@@ -135,6 +135,14 @@ result = parallel_compute_metrics(
 )
 ```
 
+`parallel_compute_metrics` uses `concurrency` as the requested task fan-out. To
+keep accidental fan-out bounded, it also accepts the same cap parameters as
+`analytics_toolkit.sql.async_sql`: `soft_concurrency_cap` throttles active metric
+workers below the requested concurrency, while `hard_concurrency_cap` rejects an
+unthrottled effective concurrency above the cap. The default hard cap is `10`;
+set a lower `soft_concurrency_cap` or a higher `hard_concurrency_cap` for larger
+batches.
+
 Load each task dataframe from the same SQL connection alias with
 `parallel_compute_metrics_from_sql`:
 
@@ -162,7 +170,9 @@ result = parallel_compute_metrics_from_sql(
 
 The top-level `start_comment` is passed to the SQL reads created for each task.
 A task-level `start_comment` overrides it and applies to both `sql` and
-`pre_exp_sql` for that metrics task.
+`pre_exp_sql` for that metrics task. `soft_concurrency_cap` and
+`hard_concurrency_cap` are applied to both the SQL-loading phase and the metric
+calculation phase.
 
 Format metric comparison output for presentation with `format_ab_metrics`:
 
