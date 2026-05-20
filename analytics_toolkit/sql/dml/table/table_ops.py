@@ -29,6 +29,7 @@ from ...ddl.create_sql_table import create_sql_table
 from ...ddl.create_sql_table import quote_identifier
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
 from ...labels import apply_query_label
+from ...operation_runner import timed_public_sql_function
 from ...plans import SqlOperationMetadata, SqlPlan
 from analytics_toolkit.general import time_print
 
@@ -345,6 +346,7 @@ def analyze_table(
     return None
 
 
+@timed_public_sql_function
 def gp_vacuum(
     table_name: str,
     analyze: bool = False,

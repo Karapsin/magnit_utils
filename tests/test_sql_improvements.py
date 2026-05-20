@@ -36,6 +36,7 @@ ch_move_module = importlib.import_module(
 operation_runner_module = importlib.import_module(
     "analytics_toolkit.sql.operation_runner"
 )
+sql_module = importlib.import_module("analytics_toolkit.sql")
 cli_module = importlib.import_module("analytics_toolkit.cli")
 
 
@@ -77,6 +78,20 @@ def test_tracked_sql_operation_logs_finished_preview(capsys) -> None:
         in output
     )
     assert "Finished SQL statement:\nselect * from source_table" in output
+
+
+def test_public_sql_function_logs_total_elapsed_for_dry_run(capsys) -> None:
+    plan = sql_module.load_df(
+        "gp",
+        "sandbox.scores",
+        pd.DataFrame({"user_id": [1], "score": [10]}),
+        write_mode="truncate_insert",
+        dry_run=True,
+    )
+
+    output = capsys.readouterr().out
+    assert plan.operation == "load_df"
+    assert "SQL function load_df execution took " in output
 
 
 def test_load_df_dry_run_returns_ordered_labeled_plan() -> None:

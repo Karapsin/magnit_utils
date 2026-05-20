@@ -17,6 +17,7 @@ from ....connection.get_sql_connection import get_sql_connection
 from ....operation_runner import (
     run_annotated_once,
     run_retrying_operation,
+    timed_public_sql_function,
     tracked_sql_operation,
 )
 from ....plan_steps import (
@@ -40,6 +41,7 @@ from ..runtime.models import TransferOptions
 from ..runtime.retry import run_with_retry
 
 
+@timed_public_sql_function
 def transfer_table(
     from_db: str,
     to_db: str,

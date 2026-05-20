@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from .errors import SqlConfigError, UnsupportedConnectionTypeError
+from ..operation_runner import timed_public_sql_function
 
 
 BackendName = Literal["trino", "gp", "ch"]
@@ -144,6 +145,7 @@ def get_connection_backend(connection_key: str) -> BackendName:
     return config.backend
 
 
+@timed_public_sql_function
 def validate_connections(
     keys: Sequence[str] | None = None,
     *,

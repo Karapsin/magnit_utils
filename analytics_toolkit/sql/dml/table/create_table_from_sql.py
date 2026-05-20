@@ -22,7 +22,7 @@ from ...connection.errors import (
 from ...connection.get_sql_connection import get_sql_connection
 from ...ddl.create_sql_table import create_sql_table
 from ...labels import apply_query_label
-from ...operation_runner import tracked_sql_operation
+from ...operation_runner import timed_public_sql_function, tracked_sql_operation
 from ...plan_steps import (
     add_create_table_placeholder_step,
     add_drop_target_steps,
@@ -47,6 +47,7 @@ def transfer_table(**kwargs: Any) -> int:
     return _transfer_table(**kwargs)
 
 
+@timed_public_sql_function
 def create_table_from_sql(
     source_db: str,
     table_name: str,

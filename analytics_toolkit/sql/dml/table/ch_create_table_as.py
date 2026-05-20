@@ -9,7 +9,7 @@ from ...connection.config import get_connection_config
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ...operation_runner import tracked_sql_operation
+from ...operation_runner import timed_public_sql_function, tracked_sql_operation
 from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from ...ch_lifecycle import (
     build_create_ch_distributed_table_pair_sqls,
@@ -27,6 +27,7 @@ from .models import ChCreateTableAsOptions
 from .table_ops import _execute_ch_command
 
 
+@timed_public_sql_function
 def ch_create_table_as(
     db_key: str,
     table_name: str,

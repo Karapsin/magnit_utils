@@ -14,9 +14,11 @@ from .config import (
     get_connections_file_path,
 )
 from .errors import SqlConfigError, UnsupportedConnectionTypeError
+from ..operation_runner import timed_public_sql_function
 from analytics_toolkit.general import time_print
 
 
+@timed_public_sql_function
 def get_sql_connection(connection_key: str) -> Any:
     config = get_connection_config(connection_key)
     time_print(f"Opening {config.connection_key} ({config.backend}) connection")
@@ -33,6 +35,7 @@ def get_sql_connection(connection_key: str) -> Any:
     )
 
 
+@timed_public_sql_function
 def with_sql_connection(connection_key: str) -> Callable[..., Any]:
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)

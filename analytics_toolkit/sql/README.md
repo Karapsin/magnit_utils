@@ -101,7 +101,9 @@ SQL query text is not printed by default. Pass `print_queries=True` to
 when you want each statement echoed before execution. `read_sql`,
 `execute_sql`, and `execute_read` still log elapsed time after every executed
 query or statement. Public SQL operations also log the first non-empty line of
-the representative SQL after the operation-finished status line.
+the representative SQL after the operation-finished status line. Public
+functions exported from `analytics_toolkit.sql` print a final total function
+duration line, including dry-run and `return_sql` paths.
 
 Pass `start_comment` to prepend a raw SQL prefix to every `read`, `execute`,
 `execute_read`, and `transfer` task query. For `transfer`, the prefix is applied

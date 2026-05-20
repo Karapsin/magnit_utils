@@ -24,7 +24,11 @@ from ...ddl.create_sql_table import (
 )
 from ...connection.config import TrinoConfig, get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
-from ...operation_runner import run_connection_operation, tracked_sql_operation
+from ...operation_runner import (
+    run_connection_operation,
+    timed_public_sql_function,
+    tracked_sql_operation,
+)
 from ...plan_steps import (
     add_analyze_step,
     add_clear_target_steps,
@@ -57,6 +61,7 @@ from ..table.table_validation import (
 )
 
 
+@timed_public_sql_function
 def load_df(
     connection_type: str,
     destination_table: str,

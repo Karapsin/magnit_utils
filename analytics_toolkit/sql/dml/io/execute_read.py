@@ -13,7 +13,11 @@ from ...connection.errors import (
 )
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ...operation_runner import run_connection_operation, tracked_sql_operation
+from ...operation_runner import (
+    run_connection_operation,
+    timed_public_sql_function,
+    tracked_sql_operation,
+)
 from ...plans import SqlOperationMetadata, SqlOperationResult
 from ...query_timing import run_timed_query
 from analytics_toolkit.general import time_print
@@ -28,6 +32,7 @@ from .execute_sql import (
 from .models import ExecuteReadOptions
 
 
+@timed_public_sql_function
 def execute_read(
     connection_type: str,
     query: str,

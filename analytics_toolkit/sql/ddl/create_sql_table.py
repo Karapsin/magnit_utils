@@ -13,12 +13,13 @@ from ..capabilities import get_backend_capability
 from ..connection.config import resolve_connection_backend
 from ..connection.errors import UnsupportedConnectionTypeError
 from ..labels import apply_query_label
-from ..operation_runner import tracked_sql_operation
+from ..operation_runner import timed_public_sql_function, tracked_sql_operation
 from ..plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from analytics_toolkit.general import time_print
 from .models import CreateSqlTableOptions
 
 
+@timed_public_sql_function
 def create_sql_table(
     connection_type: str,
     connection: Any,
@@ -112,6 +113,7 @@ def create_sql_table(
     return None
 
 
+@timed_public_sql_function
 def build_create_table_sql(
     connection_type: str,
     table_name: str,
@@ -144,6 +146,7 @@ def build_create_table_sql(
     )
 
 
+@timed_public_sql_function
 def build_create_table_sqls(
     connection_type: str,
     table_name: str,

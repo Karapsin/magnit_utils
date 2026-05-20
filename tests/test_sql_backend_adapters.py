@@ -70,6 +70,15 @@ def test_sql_public_api_exports_are_stable() -> None:
     ]
 
 
+def test_sql_public_api_functions_are_timed() -> None:
+    for name in sql_module._TIMED_PUBLIC_SQL_FUNCTION_NAMES:
+        assert getattr(getattr(sql_module, name), "__sql_public_timing__", False)
+
+    assert sql_module.execute is sql_module.execute_sql
+    assert sql_module.read is sql_module.read_sql
+    assert sql_module.transfer is sql_module.transfer_table
+
+
 def test_table_ops_compatibility_helpers_remain_importable() -> None:
     helper_names = {
         "build_analyze_table_sql",

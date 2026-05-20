@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .connection.config import BackendName, resolve_connection_backend
+from .operation_runner import timed_public_sql_function
 
 
 WriteMode = Literal["append", "replace", "truncate_insert", "upsert"]
@@ -100,6 +101,7 @@ def validate_write_mode(
     return normalized  # type: ignore[return-value]
 
 
+@timed_public_sql_function
 def support_matrix_rows() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for capability in BACKEND_CAPABILITIES.values():
@@ -118,6 +120,7 @@ def support_matrix_rows() -> list[dict[str, str]]:
     return rows
 
 
+@timed_public_sql_function
 def format_support_matrix() -> str:
     headers = [
         "Backend",

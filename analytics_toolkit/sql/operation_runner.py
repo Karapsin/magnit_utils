@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any, TypeVar
+from functools import wraps
+from typing import Any, TypeVar, cast
 
 from analytics_toolkit.general import time_print
 
@@ -13,6 +14,27 @@ from .plans import SqlOperationMetadata
 
 T = TypeVar("T")
 ConnectionRef = dict[str, Any]
+
+
+def timed_public_sql_function(function: Callable[..., T]) -> Callable[..., T]:
+    """Print total elapsed time for a public SQL API function."""
+    if getattr(function, "__sql_public_timing__", False):
+        return function
+
+    @wraps(function)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        started_at = time.perf_counter()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            elapsed_seconds = time.perf_counter() - started_at
+            time_print(
+                f"SQL function {function.__name__} execution took "
+                f"{elapsed_seconds:.3f}s"
+            )
+
+    setattr(wrapper, "__sql_public_timing__", True)
+    return cast(Callable[..., T], wrapper)
 
 
 @contextmanager

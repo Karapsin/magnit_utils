@@ -21,6 +21,32 @@ from .dml.table import gp_vacuum
 from analytics_toolkit.general import time_print
 from .dml.transfer.flow.api import transfer_table, transfer_table as transfer
 
+_TIMED_PUBLIC_SQL_FUNCTION_NAMES = (
+    "async_sql",
+    "build_create_table_sql",
+    "build_create_table_sqls",
+    "ch_create_table_as",
+    "ch_full_table_move",
+    "create_sql_table",
+    "create_table_from_sql",
+    "execute_read",
+    "execute_sql",
+    "format_support_matrix",
+    "get_sql_connection",
+    "gp_cancel_all_running_queries",
+    "gp_vacuum",
+    "load_df",
+    "read_sql",
+    "support_matrix_rows",
+    "transfer_table",
+    "validate_connections",
+    "with_sql_connection",
+)
+
+execute = execute_sql
+read = read_sql
+transfer = transfer_table
+
 __all__ = [
     "async_sql",
     "BACKEND_CAPABILITIES",

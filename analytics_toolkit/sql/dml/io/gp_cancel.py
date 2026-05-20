@@ -7,6 +7,7 @@ import pandas as pd
 
 from ...connection.config import get_connection_config
 from ...connection.errors import UnsupportedConnectionTypeError
+from ...operation_runner import timed_public_sql_function
 from .read_sql import read_sql
 
 
@@ -17,6 +18,7 @@ where usename = current_user
 _GP_CANCEL_RESULT_COLUMNS = ["pid", "cancel_query", "cancelled"]
 
 
+@timed_public_sql_function
 def gp_cancel_all_running_queries(
     connection_key: str = "gp",
     concurrency: int = 1,

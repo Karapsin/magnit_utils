@@ -17,6 +17,7 @@ from .dml.io.execute_sql import execute_sql
 from .dml.io.read_sql import read_sql
 from .dml.load.load_df import load_df
 from .dml.transfer.flow.api import transfer_table
+from .operation_runner import timed_public_sql_function
 
 _SUPPORTED_TASK_TYPES = frozenset(
     {"read", "execute", "execute_read", "load_df", "transfer", "custom_sql_pipeline"}
@@ -49,6 +50,7 @@ class _PipelineContext:
         return self.results[-1]
 
 
+@timed_public_sql_function
 def async_sql(
     tasks: Sequence[Mapping[str, Any]],
     *,

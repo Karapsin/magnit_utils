@@ -17,7 +17,7 @@ from ...ddl.create_sql_table import (
 )
 from ...ddl.create_sql_table import _wait_for_ch_table
 from ...labels import apply_query_label
-from ...operation_runner import tracked_sql_operation
+from ...operation_runner import timed_public_sql_function, tracked_sql_operation
 from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from analytics_toolkit.general import time_print
 from .models import ChFullTableMoveOptions
@@ -50,6 +50,7 @@ _ORDER_FOLLOWING_CLAUSES = (
 )
 
 
+@timed_public_sql_function
 def ch_full_table_move(
     db_key: str,
     move_table: str,
