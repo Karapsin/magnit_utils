@@ -16,8 +16,10 @@ from ...connection.errors import (
 from ...connection.config import get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ...operation_runner import run_connection_operation
+from ...operation_runner import run_connection_operation, tracked_sql_operation
+from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from analytics_toolkit.general import time_print
+from .models import ExecuteSqlOptions
 
 
 def _execute_trino(
@@ -121,7 +123,99 @@ def execute_sql(
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
     query_label: str | None = None,
+    dry_run: bool = False,
+    return_sql: bool = False,
+    return_metadata: bool = False,
 ) -> Any:
+    options = _build_execute_sql_options(
+        connection_type=connection_type,
+        query=query,
+        random_sleep_seconds=random_sleep_seconds,
+        print_queries=print_queries,
+        gp_break_query=gp_break_query,
+        gp_commit_each_statement=gp_commit_each_statement,
+        retry_cnt=retry_cnt,
+        timeout_increment=timeout_increment,
+        query_label=query_label,
+        dry_run=dry_run,
+        return_sql=return_sql,
+        return_metadata=return_metadata,
+    )
+
+    if options.dry_run or options.return_sql:
+        return build_execute_sql_plan(options)
+
+    statements = _planned_execute_statements(options)
+    metadata = SqlOperationMetadata(
+        statement_count=len(statements),
+        query_label=options.query_label,
+    )
+
+    def operation(connection_ref: dict[str, Any], attempt: int) -> Any:
+        with tracked_sql_operation(
+            metadata=metadata,
+            operation_name="execute_sql",
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="execute",
+            retry_attempt=attempt,
+            query_label=options.query_label,
+        ):
+            result = _execute_backend(
+                options.backend,
+                connection_ref["connection"],
+                options.sql,
+                random_sleep_seconds=options.random_sleep_seconds,
+                print_queries=options.print_queries,
+                gp_break_query=options.gp_break_query,
+                gp_commit_each_statement=options.gp_commit_each_statement,
+            )
+            metadata.affected_rows = None
+            return result
+
+    def context(attempt: int) -> SqlOperationContext:
+        return SqlOperationContext(
+            operation="execute_sql",
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="execute",
+            retry_attempt=attempt,
+            sql_preview=sql_preview(options.sql),
+        )
+
+    result = run_connection_operation(
+        operation_name=f"executing SQL on {options.connection_key} ({options.backend})",
+        connection_key=options.connection_key,
+        backend=options.backend,
+        retry_cnt=options.retry_cnt,
+        timeout_increment=options.timeout_increment,
+        open_connection=get_sql_connection,
+        operation=operation,
+        context_factory=context,
+    )
+    if options.return_metadata:
+        return SqlOperationResult(
+            rows=None,
+            metadata=metadata,
+        )
+    return result
+
+
+def _build_execute_sql_options(
+    *,
+    connection_type: str,
+    query: str,
+    random_sleep_seconds: float | None,
+    print_queries: bool,
+    gp_break_query: bool,
+    gp_commit_each_statement: bool,
+    retry_cnt: int,
+    timeout_increment: int | float,
+    query_label: str | None,
+    dry_run: bool,
+    return_sql: bool,
+    return_metadata: bool,
+) -> ExecuteSqlOptions:
     config = get_connection_config(connection_type)
     connection_key = config.connection_key
     backend = config.backend
@@ -134,39 +228,54 @@ def execute_sql(
     if timeout_increment < 0:
         raise ValueError("timeout_increment must be non-negative.")
     sql = apply_query_label(sql, query_label)
-
-    def operation(connection_ref: dict[str, Any], attempt: int) -> Any:
-        del attempt
-        return _execute_backend(
-            backend,
-            connection_ref["connection"],
-            sql,
-            random_sleep_seconds=random_sleep_seconds,
-            print_queries=print_queries,
-            gp_break_query=gp_break_query,
-            gp_commit_each_statement=gp_commit_each_statement,
-        )
-
-    def context(attempt: int) -> SqlOperationContext:
-        return SqlOperationContext(
-            operation="execute_sql",
-            alias=connection_key,
-            backend=backend,
-            phase="execute",
-            retry_attempt=attempt,
-            sql_preview=sql_preview(sql),
-        )
-
-    return run_connection_operation(
-        operation_name=f"executing SQL on {connection_key} ({backend})",
+    return ExecuteSqlOptions(
         connection_key=connection_key,
         backend=backend,
+        sql=sql,
+        random_sleep_seconds=random_sleep_seconds,
+        print_queries=print_queries,
+        gp_break_query=gp_break_query,
+        gp_commit_each_statement=gp_commit_each_statement,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
-        open_connection=get_sql_connection,
-        operation=operation,
-        context_factory=context,
+        query_label=query_label,
+        dry_run=dry_run,
+        return_sql=return_sql,
+        return_metadata=return_metadata,
     )
+
+
+def build_execute_sql_plan(options: ExecuteSqlOptions) -> SqlPlan:
+    statements = _planned_execute_statements(options)
+    plan = SqlPlan(
+        operation="execute_sql",
+        target_alias=options.connection_key,
+        target_backend=options.backend,
+        options={
+            "random_sleep_seconds": options.random_sleep_seconds,
+            "print_queries": options.print_queries,
+            "gp_break_query": options.gp_break_query,
+            "gp_commit_each_statement": options.gp_commit_each_statement,
+        },
+        metadata=SqlOperationMetadata(
+            statement_count=len(statements),
+            query_label=options.query_label,
+        ),
+    )
+    for statement in statements:
+        plan.add(
+            statement,
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="execute",
+        )
+    return plan
+
+
+def _planned_execute_statements(options: ExecuteSqlOptions) -> list[str]:
+    if options.backend == "gp" and not options.gp_break_query:
+        return [options.sql]
+    return _split_sql_statements(options.sql)
 
 
 def _execute_ch_statement(client: Any, query: str) -> None:

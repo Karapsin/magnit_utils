@@ -220,6 +220,27 @@ def test_ch_full_table_move_preserves_source_ddl_and_lifecycle(
     assert "cityHash64(id)" in distributed_create
 
 
+def test_ch_full_table_move_return_metadata_tracks_operation(
+    fake_client: FakeClickHouseClient,
+) -> None:
+    result = ch_move_module.ch_full_table_move(
+        "ch",
+        SOURCE_TABLE,
+        TARGET_TABLE,
+        return_metadata=True,
+        query_label="move-meta",
+    )
+
+    assert result.rows is None
+    assert result.metadata.statement_count == 12
+    assert result.metadata.elapsed_seconds >= 0
+    assert result.metadata.operation_status == "success"
+    assert result.metadata.query_label == "move-meta"
+    assert fake_client.commands[4].startswith(
+        "/* analytics_toolkit query_label=move-meta */"
+    )
+
+
 def test_ch_full_table_move_partition_override_replaces_partition_only(
     fake_client: FakeClickHouseClient,
 ) -> None:

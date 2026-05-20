@@ -6,15 +6,22 @@ from typing import Any
 from ...connection.config import get_connection_config
 from ...connection.errors import UnsupportedConnectionTypeError
 from ...connection.get_sql_connection import get_sql_connection
-from ...ch_lifecycle import drop_ch_distributed_table_pair
+from ...ch_lifecycle import (
+    build_drop_ch_distributed_table_pair_sqls,
+    drop_ch_distributed_table_pair,
+)
 from ...ddl.create_sql_table import (
     build_ch_shard_table_name,
     quote_identifier,
     split_ch_table_name_for_distributed_engine,
 )
 from ...ddl.create_sql_table import _wait_for_ch_table
+from ...labels import apply_query_label
+from ...operation_runner import tracked_sql_operation
+from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from analytics_toolkit.general import time_print
-from .table_ops import _execute_ch_command, insert_from_table
+from .models import ChFullTableMoveOptions
+from .table_ops import _execute_ch_command, build_insert_from_table_sql, insert_from_table
 
 
 _SHARD_ENGINE_FOLLOWING_CLAUSES = (
@@ -53,7 +60,11 @@ def ch_full_table_move(
     ch_engine: str | None = None,
     ch_cluster: str | None = "{cluster}",
     sharding_key: str | None = None,
-) -> None:
+    dry_run: bool = False,
+    return_sql: bool = False,
+    return_metadata: bool = False,
+    query_label: str | None = None,
+) -> SqlPlan | SqlOperationResult | None:
     config = get_connection_config(db_key)
     if config.backend != "ch":
         raise UnsupportedConnectionTypeError(
@@ -90,81 +101,256 @@ def ch_full_table_move(
         if sharding_key is None
         else _normalize_required_string(sharding_key, "sharding_key")
     )
+    options = ChFullTableMoveOptions(
+        connection_key=config.connection_key,
+        backend=config.backend,
+        source_table=source_table,
+        target_table=target_table,
+        ch_partition_by=partition_override,
+        ch_order_by=order_override,
+        ch_engine=engine_override,
+        ch_cluster=cluster_override,
+        sharding_key=sharding_key_override,
+        dry_run=dry_run,
+        return_sql=return_sql,
+        return_metadata=return_metadata,
+        query_label=query_label,
+    )
+
+    if options.dry_run or options.return_sql:
+        return build_ch_full_table_move_plan(options)
 
     connection = get_sql_connection(config.connection_key)
+    metadata = SqlOperationMetadata(query_label=options.query_label)
     try:
-        time_print(
-            f"Moving ClickHouse table {source_table} to "
-            f"{target_table} on {config.connection_key}"
-        )
-        time_print(f"Reading ClickHouse DDL for distributed table {source_table}")
-        source_distributed_ddl = _show_create_table(connection, source_table)
-        source_shard_table = (
-            _extract_distributed_shard_table_name(
-                source_distributed_ddl,
-                source_table,
+        with tracked_sql_operation(
+            metadata=metadata,
+            operation_name="ch_full_table_move",
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="move_table",
+            query_label=options.query_label,
+        ):
+            time_print(
+                f"Moving ClickHouse table {source_table} to "
+                f"{target_table} on {config.connection_key}"
             )
-            or source_shard_table
-        )
-        time_print(f"Resolved source shard table {source_shard_table}")
-        time_print(f"Reading ClickHouse DDL for shard table {source_shard_table}")
-        source_shard_ddl = _show_create_table(connection, source_shard_table)
-        source_cluster = (
-            _extract_on_cluster_name(source_shard_ddl)
-            or _extract_on_cluster_name(source_distributed_ddl)
-            or _extract_distributed_cluster_name(source_distributed_ddl)
-        )
-        target_cluster = cluster_override or source_cluster
-        if target_cluster is not None:
-            time_print(f"Using ClickHouse cluster {target_cluster} for target DDL")
+            time_print(f"Reading ClickHouse DDL for distributed table {source_table}")
+            source_distributed_ddl = _show_create_table(connection, source_table)
+            source_shard_table = (
+                _extract_distributed_shard_table_name(
+                    source_distributed_ddl,
+                    source_table,
+                )
+                or source_shard_table
+            )
+            time_print(f"Resolved source shard table {source_shard_table}")
+            time_print(f"Reading ClickHouse DDL for shard table {source_shard_table}")
+            source_shard_ddl = _show_create_table(connection, source_shard_table)
+            source_cluster = (
+                _extract_on_cluster_name(source_shard_ddl)
+                or _extract_on_cluster_name(source_distributed_ddl)
+                or _extract_distributed_cluster_name(source_distributed_ddl)
+            )
+            target_cluster = cluster_override or source_cluster
+            if target_cluster is not None:
+                time_print(f"Using ClickHouse cluster {target_cluster} for target DDL")
 
-        target_shard_ddl = _build_target_shard_ddl(
-            source_shard_ddl,
-            target_shard_table,
-            ch_partition_by=partition_override,
-            ch_order_by=order_override,
-            ch_engine=engine_override,
-            ch_cluster=target_cluster,
-        )
-        target_distributed_ddl = _build_target_distributed_ddl(
-            source_distributed_ddl,
-            target_table,
-            target_shard_table,
-            ch_cluster=target_cluster,
-            sharding_key=sharding_key_override,
-        )
+            target_shard_ddl = _build_target_shard_ddl(
+                source_shard_ddl,
+                target_shard_table,
+                ch_partition_by=partition_override,
+                ch_order_by=order_override,
+                ch_engine=engine_override,
+                ch_cluster=target_cluster,
+            )
+            target_distributed_ddl = _build_target_distributed_ddl(
+                source_distributed_ddl,
+                target_table,
+                target_shard_table,
+                ch_cluster=target_cluster,
+                sharding_key=sharding_key_override,
+            )
 
-        time_print(
-            f"Dropping target ClickHouse table pair {target_table} / "
-            f"{target_shard_table}"
-        )
-        _drop_ch_distributed_table_pair(connection, target_table, target_cluster)
-        time_print(f"Creating target shard table {target_shard_table}")
-        _execute_ch_command(connection, target_shard_ddl)
-        time_print(f"Creating target distributed table {target_table}")
-        _execute_ch_command(connection, target_distributed_ddl)
-        local_distributed_ddl = _remove_on_cluster_clause(target_distributed_ddl)
-        if local_distributed_ddl != target_distributed_ddl:
-            time_print(f"Creating local distributed table {target_table}")
-            _execute_ch_command(connection, local_distributed_ddl)
-        time_print(f"Waiting for target table {target_table}")
-        _wait_for_ch_table(connection, target_table)
-        time_print(f"Inserting data from {source_table} into {target_table}")
-        insert_from_table("ch", connection, target_table, source_table)
-        time_print(
-            f"Dropping source ClickHouse table pair {source_table} / "
-            f"{source_shard_table}"
-        )
-        _drop_ch_distributed_table_pair(
-            connection,
-            source_table,
-            source_cluster,
-            shard_table=source_shard_table,
-        )
-        time_print(f"Finished moving ClickHouse table {source_table} to {target_table}")
+            time_print(
+                f"Dropping target ClickHouse table pair {target_table} / "
+                f"{target_shard_table}"
+            )
+            _drop_ch_distributed_table_pair(
+                connection,
+                target_table,
+                target_cluster,
+                query_label=options.query_label,
+            )
+            time_print(f"Creating target shard table {target_shard_table}")
+            _execute_ch_command(
+                connection,
+                apply_query_label(target_shard_ddl, options.query_label),
+            )
+            time_print(f"Creating target distributed table {target_table}")
+            _execute_ch_command(
+                connection,
+                apply_query_label(target_distributed_ddl, options.query_label),
+            )
+            local_distributed_ddl = _remove_on_cluster_clause(target_distributed_ddl)
+            if local_distributed_ddl != target_distributed_ddl:
+                time_print(f"Creating local distributed table {target_table}")
+                _execute_ch_command(
+                    connection,
+                    apply_query_label(local_distributed_ddl, options.query_label),
+                )
+            time_print(f"Waiting for target table {target_table}")
+            _wait_for_ch_table(connection, target_table)
+            time_print(f"Inserting data from {source_table} into {target_table}")
+            insert_from_table(
+                "ch",
+                connection,
+                target_table,
+                source_table,
+                query_label=options.query_label,
+            )
+            time_print(
+                f"Dropping source ClickHouse table pair {source_table} / "
+                f"{source_shard_table}"
+            )
+            _drop_ch_distributed_table_pair(
+                connection,
+                source_table,
+                source_cluster,
+                shard_table=source_shard_table,
+                query_label=options.query_label,
+            )
+            metadata.statement_count = 12
+            time_print(
+                f"Finished moving ClickHouse table {source_table} to {target_table}"
+            )
     finally:
         time_print(f"Closing {config.connection_key} connection")
         connection.close()
+    if options.return_metadata:
+        return SqlOperationResult(rows=None, metadata=metadata)
+    return None
+
+
+def build_ch_full_table_move_plan(options: ChFullTableMoveOptions) -> SqlPlan:
+    source_shard_table = build_ch_shard_table_name(options.source_table)
+    target_shard_table = build_ch_shard_table_name(options.target_table)
+    target_cluster = (
+        options.ch_cluster if options.ch_cluster is not None else "{source_cluster}"
+    )
+    source_cluster = "{source_cluster}"
+    sqls: list[tuple[str, str, str | None, str | None]] = [
+        (
+            f"SHOW CREATE TABLE {options.source_table}",
+            "inspect",
+            None,
+            options.source_table,
+        ),
+        (
+            f"SHOW CREATE TABLE {source_shard_table}",
+            "inspect",
+            None,
+            source_shard_table,
+        ),
+    ]
+    sqls.extend(
+        (
+            sql,
+            "drop_target",
+            options.target_table,
+            None,
+        )
+        for sql in build_drop_ch_distributed_table_pair_sqls(
+            options.target_table,
+            ch_cluster=target_cluster,
+            query_label=options.query_label,
+        )
+    )
+    sqls.extend(
+        [
+            (
+                f"CREATE TABLE IF NOT EXISTS {target_shard_table} "
+                "(<source shard schema and engine>)",
+                "create_target",
+                options.target_table,
+                None,
+            ),
+            (
+                f"CREATE TABLE IF NOT EXISTS {options.target_table} "
+                "(<source distributed schema and engine>)",
+                "create_target",
+                options.target_table,
+                None,
+            ),
+            (
+                f"CREATE TABLE IF NOT EXISTS {options.target_table} "
+                "(<local distributed schema and engine>)",
+                "create_target",
+                options.target_table,
+                None,
+            ),
+            (
+                build_insert_from_table_sql(
+                    "ch",
+                    options.target_table,
+                    options.source_table,
+                    query_label=options.query_label,
+                ),
+                "insert_target",
+                options.target_table,
+                options.source_table,
+            ),
+        ]
+    )
+    sqls.extend(
+        (
+            sql,
+            "cleanup",
+            options.source_table,
+            None,
+        )
+        for sql in build_drop_ch_distributed_table_pair_sqls(
+            options.source_table,
+            ch_cluster=source_cluster,
+            shard_table=source_shard_table,
+            query_label=options.query_label,
+        )
+    )
+
+    plan = SqlPlan(
+        operation="ch_full_table_move",
+        source_alias=options.connection_key,
+        target_alias=options.connection_key,
+        source_backend=options.backend,
+        target_backend=options.backend,
+        source_table=options.source_table,
+        target_table=options.target_table,
+        options={
+            "ch_partition_by": options.ch_partition_by,
+            "ch_order_by": options.ch_order_by,
+            "ch_engine": options.ch_engine,
+            "ch_cluster": options.ch_cluster,
+            "sharding_key": options.sharding_key,
+            "inspection_required": True,
+            "inspection_note": (
+                "Exact target DDL and source shard name require SHOW CREATE TABLE."
+            ),
+        },
+        metadata=SqlOperationMetadata(
+            statement_count=len(sqls),
+            query_label=options.query_label,
+        ),
+    )
+    for sql, phase, target_table, source_table in sqls:
+        plan.add(
+            sql,
+            alias=options.connection_key,
+            backend=options.backend,
+            phase=phase,
+            target_table=target_table,
+            source_table=source_table,
+        )
+    return plan
 
 
 def _build_target_shard_ddl(
@@ -250,12 +436,14 @@ def _drop_ch_distributed_table_pair(
     ch_cluster: str | None,
     *,
     shard_table: str | None = None,
+    query_label: str | None = None,
 ) -> None:
     drop_ch_distributed_table_pair(
         connection,
         table_name,
         ch_cluster=ch_cluster,
         shard_table=shard_table,
+        query_label=query_label,
     )
 
 

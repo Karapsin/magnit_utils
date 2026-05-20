@@ -15,8 +15,10 @@ from ...connection.errors import (
 from ...connection.config import get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ...operation_runner import run_connection_operation
+from ...operation_runner import run_connection_operation, tracked_sql_operation
+from ...plans import SqlOperationMetadata, SqlOperationResult
 from analytics_toolkit.general import time_print
+from .models import ReadSqlOptions
 
 
 def _read_trino(conn: Any, query: str, print_queries: bool = True) -> pd.DataFrame:
@@ -67,7 +69,121 @@ def read_sql(
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
     query_label: str | None = None,
-) -> pd.DataFrame:
+    return_metadata: bool = False,
+) -> pd.DataFrame | SqlOperationResult:
+    return _read_sql_impl(
+        connection_type=connection_type,
+        query=query,
+        print_queries=print_queries,
+        retry_cnt=retry_cnt,
+        timeout_increment=timeout_increment,
+        query_label=query_label,
+        return_metadata=return_metadata,
+    )
+
+
+def read_sql_with_metadata(
+    connection_type: str,
+    query: str,
+    print_queries: bool = True,
+    retry_cnt: int = 5,
+    timeout_increment: int | float = 5,
+    query_label: str | None = None,
+) -> SqlOperationResult:
+    return _read_sql_impl(
+        connection_type=connection_type,
+        query=query,
+        print_queries=print_queries,
+        retry_cnt=retry_cnt,
+        timeout_increment=timeout_increment,
+        query_label=query_label,
+        return_metadata=True,
+    )
+
+
+def _read_sql_impl(
+    connection_type: str,
+    query: str,
+    *,
+    print_queries: bool,
+    retry_cnt: int,
+    timeout_increment: int | float,
+    query_label: str | None,
+    return_metadata: bool,
+) -> pd.DataFrame | SqlOperationResult:
+    options = _build_read_sql_options(
+        connection_type=connection_type,
+        query=query,
+        print_queries=print_queries,
+        retry_cnt=retry_cnt,
+        timeout_increment=timeout_increment,
+        query_label=query_label,
+        return_metadata=return_metadata,
+    )
+    metadata = SqlOperationMetadata(
+        statement_count=1,
+        query_label=options.query_label,
+    )
+
+    def operation(connection_ref: dict[str, Any], attempt: int) -> pd.DataFrame:
+        with tracked_sql_operation(
+            metadata=metadata,
+            operation_name="read_sql",
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="read",
+            retry_attempt=attempt,
+            query_label=options.query_label,
+        ):
+            result = _read_backend(
+                options.backend,
+                connection_ref["connection"],
+                options.sql,
+                print_queries=options.print_queries,
+            )
+            metadata.read_rows = len(result)
+            metadata.source_rows = len(result)
+            return result
+
+    def context(attempt: int) -> SqlOperationContext:
+        return SqlOperationContext(
+            operation="read_sql",
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="read",
+            retry_attempt=attempt,
+            sql_preview=sql_preview(options.sql),
+        )
+
+    result = run_connection_operation(
+        operation_name=f"reading query on {options.connection_key} ({options.backend})",
+        connection_key=options.connection_key,
+        backend=options.backend,
+        retry_cnt=options.retry_cnt,
+        timeout_increment=options.timeout_increment,
+        open_connection=get_sql_connection,
+        operation=operation,
+        context_factory=context,
+    )
+    if return_metadata:
+        return SqlOperationResult(
+            rows=len(result),
+            metadata=metadata,
+            data=result,
+        )
+    return result
+
+
+def _build_read_sql_options(
+    *,
+    connection_type: str,
+    query: str,
+    print_queries: bool,
+    retry_cnt: int,
+    timeout_increment: int | float,
+    query_label: str | None,
+    return_metadata: bool,
+) -> ReadSqlOptions:
     config = get_connection_config(connection_type)
     connection_key = config.connection_key
     backend = config.backend
@@ -88,35 +204,15 @@ def read_sql(
     if len(statements) != 1:
         raise InvalidSqlInputError("read_sql expects exactly one SQL statement.")
     sql = apply_query_label(statements[0].rstrip(";").rstrip(), query_label)
-
-    def operation(connection_ref: dict[str, Any], attempt: int) -> pd.DataFrame:
-        del attempt
-        return _read_backend(
-            backend,
-            connection_ref["connection"],
-            sql,
-            print_queries=print_queries,
-        )
-
-    def context(attempt: int) -> SqlOperationContext:
-        return SqlOperationContext(
-            operation="read_sql",
-            alias=connection_key,
-            backend=backend,
-            phase="read",
-            retry_attempt=attempt,
-            sql_preview=sql_preview(sql),
-        )
-
-    return run_connection_operation(
-        operation_name=f"reading query on {connection_key} ({backend})",
+    return ReadSqlOptions(
         connection_key=connection_key,
         backend=backend,
+        sql=sql,
+        print_queries=print_queries,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
-        open_connection=get_sql_connection,
-        operation=operation,
-        context_factory=context,
+        query_label=query_label,
+        return_metadata=return_metadata,
     )
 
 

@@ -285,13 +285,21 @@ use `write_mode` for explicit behavior:
   target exists.
 - `upsert`: reserved and currently rejected for all backends.
 
-`load_df`, `transfer_table`, `create_table_from_sql`, `create_sql_table`, and
-`ch_create_table_as` accept `dry_run=True` or `return_sql=True` to return a
-`SqlPlan` without mutating a database. Plans contain ordered SQL statements,
-aliases/backends, target metadata, and notable options. `load_df`,
-`transfer_table`, and `create_table_from_sql` also accept
-`return_metadata=True`; the returned `SqlOperationResult` includes row counts
-that can be collected without changing the historical default return values.
+`execute_sql`, `load_df`, `transfer_table`, `create_table_from_sql`,
+`create_sql_table`, `ch_create_table_as`, and `ch_full_table_move` accept
+`dry_run=True` or `return_sql=True` to return a `SqlPlan` without mutating a
+database. Plans contain ordered SQL statements, aliases/backends, target
+metadata, and notable options. Operations that require live inspection for
+exact SQL, such as `ch_full_table_move`, use deterministic placeholder steps
+and mark the inspection dependency in `SqlPlan.options` instead of opening a
+connection.
+
+`read_sql`, `execute_sql`, `execute_read`, `load_df`, `transfer_table`,
+`create_table_from_sql`, `create_sql_table`, `ch_create_table_as`, and
+`ch_full_table_move` also accept `return_metadata=True`; the returned
+`SqlOperationResult` includes row counts when available plus metadata such as
+elapsed seconds, retry attempts, statement count, operation status, and query
+label. Historical default return values are unchanged.
 
 Use `query_label` to add a safe SQL comment to generated statements and logs:
 
@@ -314,6 +322,22 @@ loaded = sql.load_df(
 )
 loaded.rows
 loaded.metadata.final_target_rows
+
+planned_execute = sql.execute(
+    "trino",
+    "delete from sandbox.old_rows",
+    dry_run=True,
+    query_label="cleanup_old_rows",
+)
+
+read_result = sql.read(
+    "gp",
+    "select * from sandbox.scores",
+    print_queries=False,
+    return_metadata=True,
+)
+scores_df = read_result.data
+read_result.metadata.elapsed_seconds
 ```
 
 `transfer_table` reads native source query column types before loading data.

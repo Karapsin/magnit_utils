@@ -14,6 +14,10 @@ identifiers_module = importlib.import_module("analytics_toolkit.sql.identifiers"
 config_module = importlib.import_module("analytics_toolkit.sql.connection.config")
 load_df_module = importlib.import_module("analytics_toolkit.sql.dml.load.load_df")
 read_sql_module = importlib.import_module("analytics_toolkit.sql.dml.io.read_sql")
+execute_sql_module = importlib.import_module("analytics_toolkit.sql.dml.io.execute_sql")
+execute_read_module = importlib.import_module(
+    "analytics_toolkit.sql.dml.io.execute_read"
+)
 transfer_api_module = importlib.import_module(
     "analytics_toolkit.sql.dml.transfer.flow.api"
 )
@@ -22,6 +26,9 @@ create_table_module = importlib.import_module(
 )
 ch_ctas_module = importlib.import_module(
     "analytics_toolkit.sql.dml.table.ch_create_table_as"
+)
+ch_move_module = importlib.import_module(
+    "analytics_toolkit.sql.dml.table.ch_full_table_move"
 )
 cli_module = importlib.import_module("analytics_toolkit.cli")
 
@@ -152,6 +159,114 @@ def test_read_sql_prefixes_query_label(monkeypatch) -> None:
     )
 
 
+def test_read_sql_return_metadata_preserves_dataframe(monkeypatch) -> None:
+    connection = FakeDbapiConnection(
+        rows=[(1,), (2,)],
+        description=[("value",)],
+    )
+    monkeypatch.setattr(read_sql_module, "get_sql_connection", lambda key: connection)
+
+    result = read_sql_module.read_sql(
+        "gp",
+        "select value from source_table",
+        print_queries=False,
+        retry_cnt=1,
+        timeout_increment=0,
+        query_label="metadata-read",
+        return_metadata=True,
+    )
+
+    assert result.rows == 2
+    assert result.data["value"].tolist() == [1, 2]
+    assert result.metadata.read_rows == 2
+    assert result.metadata.statement_count == 1
+    assert result.metadata.retry_attempts == 1
+    assert result.metadata.elapsed_seconds >= 0
+    assert result.metadata.operation_status == "success"
+    assert result.metadata.query_label == "metadata-read"
+
+
+def test_execute_sql_dry_run_does_not_open_connection(monkeypatch) -> None:
+    monkeypatch.setattr(
+        execute_sql_module,
+        "get_sql_connection",
+        lambda key: pytest.fail("connection should not be opened"),
+    )
+
+    plan = execute_sql_module.execute_sql(
+        "trino",
+        "select 1; select 2",
+        random_sleep_seconds=None,
+        dry_run=True,
+        query_label="dry-exec",
+    )
+
+    assert plan.operation == "execute_sql"
+    assert plan.target_alias == "trino"
+    assert [statement.phase for statement in plan.statements] == [
+        "execute",
+        "execute",
+    ]
+    assert plan.metadata.statement_count == 2
+    assert sum("query_label=dry-exec" in sql for sql in plan.sqls) == 1
+
+
+def test_execute_sql_return_metadata_reports_attempt_and_statement_count(
+    monkeypatch,
+) -> None:
+    connection = FakeDbapiConnection()
+    monkeypatch.setattr(
+        execute_sql_module,
+        "get_sql_connection",
+        lambda key: connection,
+    )
+
+    result = execute_sql_module.execute_sql(
+        "gp",
+        "select 1",
+        random_sleep_seconds=None,
+        print_queries=False,
+        retry_cnt=1,
+        timeout_increment=0,
+        return_metadata=True,
+    )
+
+    assert result.rows is None
+    assert result.metadata.statement_count == 1
+    assert result.metadata.retry_attempts == 1
+    assert result.metadata.elapsed_seconds >= 0
+    assert result.metadata.operation_status == "success"
+
+
+def test_execute_read_return_metadata_preserves_dataframe(monkeypatch) -> None:
+    connection = FakeDbapiConnection(
+        rows=[(1, "ok")],
+        description=[("id",), ("status",)],
+    )
+    monkeypatch.setattr(
+        execute_read_module,
+        "get_sql_connection",
+        lambda key: connection,
+    )
+
+    result = execute_read_module.execute_read(
+        "gp",
+        "CREATE TEMP TABLE tmp AS SELECT 1; SELECT id, status FROM tmp",
+        random_sleep_seconds=None,
+        print_queries=False,
+        gp_break_query=True,
+        retry_cnt=1,
+        timeout_increment=0,
+        return_metadata=True,
+    )
+
+    assert result.rows == 1
+    assert result.data["status"].tolist() == ["ok"]
+    assert result.metadata.read_rows == 1
+    assert result.metadata.statement_count == 2
+    assert result.metadata.operation_status == "success"
+
+
 def test_transfer_dry_run_includes_source_stage_and_target_steps() -> None:
     plan = transfer_api_module.transfer_table(
         from_db="gp",
@@ -260,6 +375,31 @@ def test_ch_create_table_as_dry_run_uses_lifecycle_drop_order() -> None:
         "DROP TABLE IF EXISTS analytics.events ON CLUSTER analytics",
         "DROP TABLE IF EXISTS analytics.events_shard ON CLUSTER analytics",
     ]
+
+
+def test_ch_full_table_move_dry_run_marks_inspection_required(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ch_move_module,
+        "get_sql_connection",
+        lambda key: pytest.fail("connection should not be opened"),
+    )
+
+    plan = ch_move_module.ch_full_table_move(
+        "ch",
+        "default.source_events",
+        "default.target_events",
+        ch_cluster=None,
+        dry_run=True,
+        query_label="move-plan",
+    )
+
+    assert plan.operation == "ch_full_table_move"
+    assert plan.options["inspection_required"] is True
+    assert plan.statements[0].phase == "inspect"
+    assert "SHOW CREATE TABLE default.source_events" == plan.sqls[0]
+    assert "CREATE TABLE IF NOT EXISTS default.target_events_shard" in plan.sqls[6]
+    assert any(statement.phase == "insert_target" for statement in plan.statements)
+    assert sum("query_label=move-plan" in sql for sql in plan.sqls) == 9
 
 
 def test_validate_connections_and_cli_output(capsys) -> None:

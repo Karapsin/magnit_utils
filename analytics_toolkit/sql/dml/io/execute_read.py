@@ -13,7 +13,8 @@ from ...connection.errors import (
 )
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ...operation_runner import run_connection_operation
+from ...operation_runner import run_connection_operation, tracked_sql_operation
+from ...plans import SqlOperationMetadata, SqlOperationResult
 from analytics_toolkit.general import time_print
 from .execute_sql import (
     _execute_ch_statement,
@@ -23,6 +24,7 @@ from .execute_sql import (
     _maybe_sleep_between_queries,
     _split_sql_statements,
 )
+from .models import ExecuteReadOptions
 
 
 def execute_read(
@@ -35,7 +37,93 @@ def execute_read(
     retry_cnt: int = 5,
     timeout_increment: int | float = 5,
     query_label: str | None = None,
-) -> pd.DataFrame:
+    return_metadata: bool = False,
+) -> pd.DataFrame | SqlOperationResult:
+    options = _build_execute_read_options(
+        connection_type=connection_type,
+        query=query,
+        random_sleep_seconds=random_sleep_seconds,
+        print_queries=print_queries,
+        gp_break_query=gp_break_query,
+        gp_commit_each_statement=gp_commit_each_statement,
+        retry_cnt=retry_cnt,
+        timeout_increment=timeout_increment,
+        query_label=query_label,
+        return_metadata=return_metadata,
+    )
+    metadata = SqlOperationMetadata(
+        statement_count=len(options.statements),
+        query_label=options.query_label,
+    )
+
+    def operation(connection_ref: dict[str, Any], attempt: int) -> pd.DataFrame:
+        with tracked_sql_operation(
+            metadata=metadata,
+            operation_name="execute_read",
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="execute_read",
+            retry_attempt=attempt,
+            query_label=options.query_label,
+        ):
+            result = _execute_read_backend(
+                options.backend,
+                connection_ref["connection"],
+                options.statements,
+                random_sleep_seconds=options.random_sleep_seconds,
+                print_queries=options.print_queries,
+                gp_break_query=options.gp_break_query,
+                gp_commit_each_statement=options.gp_commit_each_statement,
+            )
+            metadata.read_rows = len(result)
+            metadata.source_rows = len(result)
+            return result
+
+    def context(attempt: int) -> SqlOperationContext:
+        return SqlOperationContext(
+            operation="execute_read",
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="execute_read",
+            retry_attempt=attempt,
+            sql_preview=sql_preview(options.statements[-1]),
+        )
+
+    result = run_connection_operation(
+        operation_name=(
+            f"executing SQL and reading final query on "
+            f"{options.connection_key} ({options.backend})"
+        ),
+        connection_key=options.connection_key,
+        backend=options.backend,
+        retry_cnt=options.retry_cnt,
+        timeout_increment=options.timeout_increment,
+        open_connection=get_sql_connection,
+        operation=operation,
+        context_factory=context,
+    )
+    if options.return_metadata:
+        return SqlOperationResult(
+            rows=len(result),
+            metadata=metadata,
+            data=result,
+        )
+    return result
+
+
+def _build_execute_read_options(
+    *,
+    connection_type: str,
+    query: str,
+    random_sleep_seconds: float | None,
+    print_queries: bool,
+    gp_break_query: bool,
+    gp_commit_each_statement: bool,
+    retry_cnt: int,
+    timeout_increment: int | float,
+    query_label: str | None,
+    return_metadata: bool,
+) -> ExecuteReadOptions:
     config = get_connection_config(connection_type)
     connection_key = config.connection_key
     backend = config.backend
@@ -56,40 +144,18 @@ def execute_read(
             apply_query_label(statement, query_label)
             for statement in statements
         ]
-
-    def operation(connection_ref: dict[str, Any], attempt: int) -> pd.DataFrame:
-        del attempt
-        return _execute_read_backend(
-            backend,
-            connection_ref["connection"],
-            statements,
-            random_sleep_seconds=random_sleep_seconds,
-            print_queries=print_queries,
-            gp_break_query=gp_break_query,
-            gp_commit_each_statement=gp_commit_each_statement,
-        )
-
-    def context(attempt: int) -> SqlOperationContext:
-        return SqlOperationContext(
-            operation="execute_read",
-            alias=connection_key,
-            backend=backend,
-            phase="execute_read",
-            retry_attempt=attempt,
-            sql_preview=sql_preview(statements[-1] if statements else sql),
-        )
-
-    return run_connection_operation(
-        operation_name=(
-            f"executing SQL and reading final query on {connection_key} ({backend})"
-        ),
+    return ExecuteReadOptions(
         connection_key=connection_key,
         backend=backend,
+        statements=statements,
+        random_sleep_seconds=random_sleep_seconds,
+        print_queries=print_queries,
+        gp_break_query=gp_break_query,
+        gp_commit_each_statement=gp_commit_each_statement,
         retry_cnt=retry_cnt,
         timeout_increment=timeout_increment,
-        open_connection=get_sql_connection,
-        operation=operation,
-        context_factory=context,
+        query_label=query_label,
+        return_metadata=return_metadata,
     )
 
 

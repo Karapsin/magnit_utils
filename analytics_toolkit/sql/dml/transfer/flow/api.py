@@ -14,7 +14,11 @@ from ....connection.errors import (
     sql_preview,
 )
 from ....connection.get_sql_connection import get_sql_connection
-from ....operation_runner import run_annotated_once, run_retrying_operation
+from ....operation_runner import (
+    run_annotated_once,
+    run_retrying_operation,
+    tracked_sql_operation,
+)
 from ....plan_steps import (
     add_analyze_step,
     add_clear_target_steps,
@@ -103,41 +107,50 @@ def transfer_table(
         f"Starting table transfer from {options.from_db_key} "
         f"to {options.to_db_key}: {options.target_table}"
     )
+    operation_metadata = SqlOperationMetadata(query_label=options.query_label)
 
     def transfer_operation(attempt: int) -> int:
-        del attempt
-        if options.to_db_backend == "gp":
-            return run_transfer_attempt(
-                options=options,
-                read_retry_cnt=options.retry_cnt,
-                insert_retry_cnt=options.retry_cnt,
-            )
-
-        def stage_restart_operation(inner_attempt: int) -> int:
-            del inner_attempt
-            try:
+        with tracked_sql_operation(
+            metadata=operation_metadata,
+            operation_name="transfer_table",
+            alias=options.to_db_key,
+            backend=options.to_db_backend,
+            phase="transfer",
+            retry_attempt=attempt,
+            query_label=options.query_label,
+        ):
+            if options.to_db_backend == "gp":
                 return run_transfer_attempt(
                     options=options,
                     read_retry_cnt=options.retry_cnt,
-                    insert_retry_cnt=1,
+                    insert_retry_cnt=options.retry_cnt,
                 )
-            except AmbiguousTableLoadError as exc:
-                time_print(
-                    f"Discarding staged load for {options.to_db_key} "
-                    f"and restarting from scratch: {exc!r}"
-                )
-                raise
 
-        return run_with_retry(
-            operation_name=(
-                f"restarting staged transfer from {options.from_db_key} "
-                f"to {options.to_db_key}: {options.target_table}"
-            ),
-            retry_cnt=options.retry_cnt,
-            timeout_increment=options.timeout_increment,
-            operation=stage_restart_operation,
-            retryable_exceptions=(AmbiguousTableLoadError,),
-        )
+            def stage_restart_operation(inner_attempt: int) -> int:
+                del inner_attempt
+                try:
+                    return run_transfer_attempt(
+                        options=options,
+                        read_retry_cnt=options.retry_cnt,
+                        insert_retry_cnt=1,
+                    )
+                except AmbiguousTableLoadError as exc:
+                    time_print(
+                        f"Discarding staged load for {options.to_db_key} "
+                        f"and restarting from scratch: {exc!r}"
+                    )
+                    raise
+
+            return run_with_retry(
+                operation_name=(
+                    f"restarting staged transfer from {options.from_db_key} "
+                    f"to {options.to_db_key}: {options.target_table}"
+                ),
+                retry_cnt=options.retry_cnt,
+                timeout_increment=options.timeout_increment,
+                operation=stage_restart_operation,
+                retryable_exceptions=(AmbiguousTableLoadError,),
+            )
 
     def transfer_context(attempt: int) -> SqlOperationContext:
         return SqlOperationContext(
@@ -172,12 +185,11 @@ def transfer_table(
         f"to {options.to_db_key}: {total_rows} row(s)"
     )
     if return_metadata:
-        metadata = SqlOperationMetadata(
-            source_rows=total_rows,
-            staged_rows=total_rows,
-            inserted_rows=total_rows,
-            affected_rows=total_rows,
-        )
+        metadata = operation_metadata
+        metadata.source_rows = total_rows
+        metadata.staged_rows = total_rows
+        metadata.inserted_rows = total_rows
+        metadata.affected_rows = total_rows
         metadata.final_target_rows = _best_effort_transfer_target_count(options)
         return SqlOperationResult(
             rows=total_rows,

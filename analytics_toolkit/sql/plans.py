@@ -24,8 +24,14 @@ class SqlOperationMetadata:
     affected_rows: int | None = None
     final_target_rows: int | None = None
     stage_table: str | None = None
+    elapsed_seconds: float | None = None
+    retry_attempts: int | None = None
+    read_rows: int | None = None
+    statement_count: int | None = None
+    operation_status: str | None = None
+    query_label: str | None = None
 
-    def as_dict(self) -> dict[str, int | str | None]:
+    def as_dict(self) -> dict[str, int | float | str | None]:
         return {
             "source_rows": self.source_rows,
             "staged_rows": self.staged_rows,
@@ -33,6 +39,12 @@ class SqlOperationMetadata:
             "affected_rows": self.affected_rows,
             "final_target_rows": self.final_target_rows,
             "stage_table": self.stage_table,
+            "elapsed_seconds": self.elapsed_seconds,
+            "retry_attempts": self.retry_attempts,
+            "read_rows": self.read_rows,
+            "statement_count": self.statement_count,
+            "operation_status": self.operation_status,
+            "query_label": self.query_label,
         }
 
 
@@ -100,9 +112,10 @@ class SqlPlan:
 
 @dataclass
 class SqlOperationResult:
-    rows: int | None
+    rows: Any
     metadata: SqlOperationMetadata
     plan: SqlPlan | None = None
+    data: Any | None = None
 
     @property
     def inserted_rows(self) -> int | None:

@@ -1,15 +1,87 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any, TypeVar
 
 from analytics_toolkit.general import time_print
 
 from .connection.errors import SqlOperationContext, annotate_sql_exception
+from .plans import SqlOperationMetadata
 
 
 T = TypeVar("T")
 ConnectionRef = dict[str, Any]
+
+
+@contextmanager
+def tracked_sql_operation(
+    *,
+    metadata: SqlOperationMetadata | None = None,
+    operation_name: str,
+    alias: str | None,
+    backend: str | None,
+    phase: str,
+    retry_attempt: int | None = None,
+    query_label: str | None = None,
+) -> Any:
+    """Record elapsed time and visible status messages for SQL operations."""
+    operation_metadata = metadata or SqlOperationMetadata()
+    operation_metadata.query_label = query_label
+    if retry_attempt is not None:
+        operation_metadata.retry_attempts = retry_attempt
+
+    label_parts = [operation_name, phase]
+    if alias is not None and backend is not None:
+        label_parts.append(f"{alias} ({backend})")
+    elif alias is not None:
+        label_parts.append(alias)
+    label = " on ".join(label_parts[:2])
+    if len(label_parts) > 2:
+        label = f"{label} for {label_parts[2]}"
+
+    started_at = time.perf_counter()
+    time_print(f"Starting SQL operation {label}")
+    try:
+        yield operation_metadata
+    except Exception:
+        operation_metadata.operation_status = "failed"
+        raise
+    else:
+        operation_metadata.operation_status = "success"
+    finally:
+        operation_metadata.elapsed_seconds = time.perf_counter() - started_at
+        status = operation_metadata.operation_status or "finished"
+        time_print(
+            f"Finished SQL operation {label}: {status} "
+            f"in {operation_metadata.elapsed_seconds:.3f}s"
+        )
+
+
+def merge_operation_metadata(
+    metadata: SqlOperationMetadata,
+    *,
+    elapsed_seconds: float | None = None,
+    retry_attempts: int | None = None,
+    read_rows: int | None = None,
+    statement_count: int | None = None,
+    operation_status: str | None = None,
+    query_label: str | None = None,
+) -> SqlOperationMetadata:
+    if elapsed_seconds is not None:
+        metadata.elapsed_seconds = elapsed_seconds
+    if retry_attempts is not None:
+        metadata.retry_attempts = retry_attempts
+    if read_rows is not None:
+        metadata.read_rows = read_rows
+    if statement_count is not None:
+        metadata.statement_count = statement_count
+    if operation_status is not None:
+        metadata.operation_status = operation_status
+    if query_label is not None:
+        metadata.query_label = query_label
+    return metadata
 
 
 def run_connection_operation(

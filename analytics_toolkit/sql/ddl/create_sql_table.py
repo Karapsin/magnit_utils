@@ -13,8 +13,10 @@ from ..capabilities import get_backend_capability
 from ..connection.config import resolve_connection_backend
 from ..connection.errors import UnsupportedConnectionTypeError
 from ..labels import apply_query_label
-from ..plans import SqlPlan
+from ..operation_runner import tracked_sql_operation
+from ..plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from analytics_toolkit.general import time_print
+from .models import CreateSqlTableOptions
 
 
 def create_sql_table(
@@ -33,13 +35,15 @@ def create_sql_table(
     dry_run: bool = False,
     return_sql: bool = False,
     query_label: str | None = None,
-) -> SqlPlan | None:
+    return_metadata: bool = False,
+) -> SqlPlan | SqlOperationResult | None:
     backend = resolve_connection_backend(connection_type)
-    time_print(f"Creating target table {table_name} on {connection_type}")
-    create_sqls = build_create_table_sqls(
-        backend,
-        table_name,
-        batch,
+    options = CreateSqlTableOptions(
+        connection_type=connection_type,
+        backend=backend,
+        connection=connection,
+        table_name=table_name,
+        batch=batch,
         column_types=column_types,
         gp_distributed_by_key=gp_distributed_by_key,
         ch_partition_by=ch_partition_by,
@@ -48,30 +52,63 @@ def create_sql_table(
         ch_cluster=ch_cluster,
         ch_sharding_key=ch_sharding_key,
         ch_distributed_table=ch_distributed_table,
+        dry_run=dry_run,
+        return_sql=return_sql,
         query_label=query_label,
+        return_metadata=return_metadata,
+    )
+    time_print(f"Creating target table {table_name} on {connection_type}")
+    create_sqls = build_create_table_sqls(
+        options.backend,
+        options.table_name,
+        options.batch,
+        column_types=options.column_types,
+        gp_distributed_by_key=options.gp_distributed_by_key,
+        ch_partition_by=options.ch_partition_by,
+        ch_order_by=options.ch_order_by,
+        ch_engine=options.ch_engine,
+        ch_cluster=options.ch_cluster,
+        ch_sharding_key=options.ch_sharding_key,
+        ch_distributed_table=options.ch_distributed_table,
+        query_label=options.query_label,
+    )
+    metadata = SqlOperationMetadata(
+        statement_count=len(create_sqls),
+        query_label=options.query_label,
     )
     plan = SqlPlan(
         operation="create_table",
-        target_alias=connection_type,
-        target_backend=backend,
-        target_table=table_name,
+        target_alias=options.connection_type,
+        target_backend=options.backend,
+        target_table=options.table_name,
+        metadata=metadata,
     )
     plan.extend(
         create_sqls,
-        alias=connection_type,
-        backend=backend,
+        alias=options.connection_type,
+        backend=options.backend,
         phase="create_table",
-        target_table=table_name,
+        target_table=options.table_name,
     )
 
-    if dry_run or return_sql:
+    if options.dry_run or options.return_sql:
         return plan
 
-    get_backend_adapter(backend).execute_commands(connection, create_sqls)
-    if backend == "ch":
-        if ch_distributed_table:
-            _wait_for_ch_table(connection, table_name)
-    return
+    with tracked_sql_operation(
+        metadata=metadata,
+        operation_name="create_sql_table",
+        alias=options.connection_type,
+        backend=options.backend,
+        phase="create_target",
+        query_label=options.query_label,
+    ):
+        get_backend_adapter(options.backend).execute_commands(options.connection, create_sqls)
+        if options.backend == "ch":
+            if options.ch_distributed_table:
+                _wait_for_ch_table(options.connection, options.table_name)
+    if options.return_metadata:
+        return SqlOperationResult(rows=None, metadata=metadata, plan=plan)
+    return None
 
 
 def build_create_table_sql(

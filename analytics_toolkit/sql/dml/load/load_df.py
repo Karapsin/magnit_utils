@@ -24,7 +24,7 @@ from ...ddl.create_sql_table import (
 )
 from ...connection.config import TrinoConfig, get_connection_config
 from ...connection.get_sql_connection import get_sql_connection
-from ...operation_runner import run_connection_operation
+from ...operation_runner import run_connection_operation, tracked_sql_operation
 from ...plan_steps import (
     add_analyze_step,
     add_clear_target_steps,
@@ -109,62 +109,76 @@ def load_df(
         return build_load_df_plan(options, df)
 
     state_holder: dict[str, LoadState | None] = {"state": None}
+    operation_metadata = SqlOperationMetadata(
+        source_rows=len(df),
+        query_label=options.query_label,
+    )
 
     def operation(
         connection_ref: dict[str, Any],
         attempt: int,
     ) -> int | SqlOperationResult:
-        del attempt
-        state_holder["state"] = None
-        state = _initialize_load_state(options, connection_ref["connection"])
-        state_holder["state"] = state
-        if df.empty:
-            return _handle_empty_dataframe_load(
-                options,
-                state,
-                return_metadata=return_metadata,
-            )
+        with tracked_sql_operation(
+            metadata=operation_metadata,
+            operation_name="load_df",
+            alias=options.connection_key,
+            backend=options.connection_backend,
+            phase="load",
+            retry_attempt=attempt,
+            query_label=options.query_label,
+        ):
+            state_holder["state"] = None
+            state = _initialize_load_state(options, connection_ref["connection"])
+            state_holder["state"] = state
+            if df.empty:
+                return _handle_empty_dataframe_load(
+                    options,
+                    state,
+                    operation_metadata=operation_metadata,
+                    return_metadata=return_metadata,
+                )
 
-        _validate_load_dataframe(options, df)
-        _prepare_load_target(
-            options=options,
-            state=state,
-            connection=connection_ref["connection"],
-            df=df,
-        )
-
-        progress_bar = _make_load_progress_bar(
-            total=len(df),
-            options=options,
-            progress=progress,
-        )
-        progress_tracker = _ProgressTracker(progress_bar)
-        try:
-            inserted_rows = _load_dataframe(
+            _validate_load_dataframe(options, df)
+            _prepare_load_target(
                 options=options,
                 state=state,
-                connection_ref=connection_ref,
+                connection=connection_ref["connection"],
                 df=df,
-                on_progress=progress_tracker.update,
             )
-            progress_tracker.complete_to(inserted_rows)
-        finally:
-            progress_bar.close()
 
-        _analyze_load_target(options, connection_ref["connection"])
-        time_print(
-            f"Finished loading DataFrame into "
-            f"{options.connection_key}.{options.destination_table}: "
-            f"{inserted_rows} row(s)"
-        )
-        return _build_load_result(
-            options=options,
-            state=state,
-            connection=connection_ref["connection"],
-            source_rows=len(df),
-            inserted_rows=inserted_rows,
-            return_metadata=return_metadata,
-        )
+            progress_bar = _make_load_progress_bar(
+                total=len(df),
+                options=options,
+                progress=progress,
+            )
+            progress_tracker = _ProgressTracker(progress_bar)
+            try:
+                inserted_rows = _load_dataframe(
+                    options=options,
+                    state=state,
+                    connection_ref=connection_ref,
+                    df=df,
+                    on_progress=progress_tracker.update,
+                )
+                progress_tracker.complete_to(inserted_rows)
+            finally:
+                progress_bar.close()
+
+            _analyze_load_target(options, connection_ref["connection"])
+            time_print(
+                f"Finished loading DataFrame into "
+                f"{options.connection_key}.{options.destination_table}: "
+                f"{inserted_rows} row(s)"
+            )
+            return _build_load_result(
+                options=options,
+                state=state,
+                connection=connection_ref["connection"],
+                source_rows=len(df),
+                inserted_rows=inserted_rows,
+                operation_metadata=operation_metadata,
+                return_metadata=return_metadata,
+            )
 
     def context(attempt: int) -> SqlOperationContext:
         return SqlOperationContext(
@@ -302,6 +316,7 @@ def _handle_empty_dataframe_load(
     options: LoadOptions,
     state: LoadState,
     *,
+    operation_metadata: SqlOperationMetadata,
     return_metadata: bool,
 ) -> int | SqlOperationResult:
     if options.append and state.target_exists:
@@ -310,13 +325,11 @@ def _handle_empty_dataframe_load(
             f"{options.connection_key}.{options.destination_table}"
         )
         if return_metadata:
+            operation_metadata.inserted_rows = 0
+            operation_metadata.affected_rows = 0
             return SqlOperationResult(
                 rows=0,
-                metadata=SqlOperationMetadata(
-                    source_rows=0,
-                    inserted_rows=0,
-                    affected_rows=0,
-                ),
+                metadata=operation_metadata,
             )
         return 0
     raise ValueError("Cannot create or replace a table from an empty DataFrame.")
@@ -466,6 +479,7 @@ def _build_load_result(
     connection: Any,
     source_rows: int,
     inserted_rows: int,
+    operation_metadata: SqlOperationMetadata,
     return_metadata: bool,
 ) -> int | SqlOperationResult:
     if not return_metadata:
@@ -479,6 +493,7 @@ def _build_load_result(
             connection=connection,
             source_rows=source_rows,
             inserted_rows=inserted_rows,
+            operation_metadata=operation_metadata,
         ),
     )
 
@@ -648,14 +663,14 @@ def _build_load_metadata(
     connection: Any,
     source_rows: int,
     inserted_rows: int,
+    operation_metadata: SqlOperationMetadata,
 ) -> SqlOperationMetadata:
-    metadata = SqlOperationMetadata(
-        source_rows=source_rows,
-        staged_rows=source_rows if state.overlap_stage_table is not None else None,
-        inserted_rows=inserted_rows,
-        affected_rows=inserted_rows,
-        stage_table=state.overlap_stage_table,
-    )
+    metadata = operation_metadata
+    metadata.source_rows = source_rows
+    metadata.staged_rows = source_rows if state.overlap_stage_table is not None else None
+    metadata.inserted_rows = inserted_rows
+    metadata.affected_rows = inserted_rows
+    metadata.stage_table = state.overlap_stage_table
     try:
         metadata.final_target_rows = count_table_rows(
             options.connection_backend,

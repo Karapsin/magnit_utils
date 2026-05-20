@@ -9,7 +9,8 @@ from ...connection.config import get_connection_config
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
 from ...connection.get_sql_connection import get_sql_connection
 from ...labels import apply_query_label
-from ...plans import SqlPlan
+from ...operation_runner import tracked_sql_operation
+from ...plans import SqlOperationMetadata, SqlOperationResult, SqlPlan
 from ...ch_lifecycle import (
     build_create_ch_distributed_table_pair_sqls,
     build_drop_ch_distributed_table_pair_sqls,
@@ -22,6 +23,7 @@ from ...ddl.create_sql_table import (
     quote_identifier,
 )
 from analytics_toolkit.general import time_print
+from .models import ChCreateTableAsOptions
 from .table_ops import _execute_ch_command
 
 
@@ -38,7 +40,8 @@ def ch_create_table_as(
     dry_run: bool = False,
     return_sql: bool = False,
     query_label: str | None = None,
-) -> SqlPlan | None:
+    return_metadata: bool = False,
+) -> SqlPlan | SqlOperationResult | None:
     config = get_connection_config(db_key)
     if config.backend != "ch":
         raise UnsupportedConnectionTypeError(
@@ -48,90 +51,128 @@ def ch_create_table_as(
     target_table = _normalize_non_empty_string(table_name, "table_name")
     query_sql = _normalize_single_query(query)
     cluster_name = _normalize_non_empty_string(ch_cluster, "ch_cluster")
+    options = ChCreateTableAsOptions(
+        connection_key=config.connection_key,
+        backend=config.backend,
+        target_table=target_table,
+        query_sql=query_sql,
+        ch_partition_by=ch_partition_by,
+        ch_order_by=ch_order_by,
+        ch_engine=ch_engine,
+        ch_cluster=cluster_name,
+        ch_sharding_key=sharding_key,
+        dry_run=dry_run,
+        return_sql=return_sql,
+        return_metadata=return_metadata,
+        query_label=query_label,
+    )
 
-    if dry_run or return_sql:
-        target_shard_table = build_ch_shard_table_name(target_table)
-        plan = SqlPlan(
-            operation="ch_create_table_as",
-            target_alias=config.connection_key,
-            target_backend=config.backend,
-            target_table=target_table,
-            options={
-                "ch_partition_by": ch_partition_by,
-                "ch_order_by": ch_order_by,
-                "ch_engine": ch_engine,
-                "ch_cluster": cluster_name,
-                "sharding_key": sharding_key,
-            },
-        )
-        for sql in [
+    if options.dry_run or options.return_sql:
+        target_shard_table = build_ch_shard_table_name(options.target_table)
+        sqls = [
             *build_drop_ch_distributed_table_pair_sqls(
-                target_table,
-                ch_cluster=cluster_name,
+                options.target_table,
+                ch_cluster=options.ch_cluster,
             ),
             f"CREATE TABLE IF NOT EXISTS {target_shard_table} (<query schema>)",
-            f"CREATE TABLE IF NOT EXISTS {target_table} (<query schema>)",
-            _build_insert_select_sql(target_table, query_sql),
-        ]:
+            f"CREATE TABLE IF NOT EXISTS {options.target_table} (<query schema>)",
+            _build_insert_select_sql(options.target_table, options.query_sql),
+        ]
+        plan = SqlPlan(
+            operation="ch_create_table_as",
+            target_alias=options.connection_key,
+            target_backend=options.backend,
+            target_table=options.target_table,
+            options={
+                "ch_partition_by": options.ch_partition_by,
+                "ch_order_by": options.ch_order_by,
+                "ch_engine": options.ch_engine,
+                "ch_cluster": options.ch_cluster,
+                "sharding_key": options.ch_sharding_key,
+            },
+            metadata=SqlOperationMetadata(
+                statement_count=len(sqls),
+                query_label=options.query_label,
+            ),
+        )
+        phases = ["drop_target"] * 4 + ["create_target", "create_target", "insert_target"]
+        for sql, phase in zip(sqls, phases):
             plan.add(
                 sql,
-                alias=config.connection_key,
-                backend=config.backend,
-                target_table=target_table,
-                query_label=query_label,
+                alias=options.connection_key,
+                backend=options.backend,
+                phase=phase,
+                target_table=options.target_table,
+                query_label=options.query_label,
             )
         return plan
 
+    metadata = SqlOperationMetadata(query_label=options.query_label)
     connection = get_sql_connection(config.connection_key)
     try:
-        target_shard_table = build_ch_shard_table_name(target_table)
-        time_print(
-            f"Creating ClickHouse table {target_table} from query on "
-            f"{config.connection_key}"
-        )
-        time_print(
-            f"Dropping target ClickHouse table pair {target_table} / "
-            f"{target_shard_table}"
-        )
-        drop_ch_distributed_table_pair(
-            connection,
-            target_table,
-            ch_cluster=cluster_name,
-            query_label=query_label,
-        )
-
-        time_print(f"Inferring ClickHouse schema for {target_table}")
-        joined_columns = _infer_ch_query_columns(connection, query_sql)
-        shard_sql, distributed_sql, local_distributed_sql = (
-            build_ch_create_table_as_sqls(
-                table_name=target_table,
-                joined_columns=joined_columns,
-                query=query_sql,
-                ch_partition_by=ch_partition_by,
-                ch_order_by=ch_order_by,
-                ch_engine=ch_engine,
-                ch_cluster=cluster_name,
-                ch_sharding_key=sharding_key,
-                query_label=query_label,
+        with tracked_sql_operation(
+            metadata=metadata,
+            operation_name="ch_create_table_as",
+            alias=options.connection_key,
+            backend=options.backend,
+            phase="create_target",
+            query_label=options.query_label,
+        ):
+            target_shard_table = build_ch_shard_table_name(options.target_table)
+            time_print(
+                f"Creating ClickHouse table {options.target_table} from query on "
+                f"{options.connection_key}"
             )
-        )
+            time_print(
+                f"Dropping target ClickHouse table pair {options.target_table} / "
+                f"{target_shard_table}"
+            )
+            drop_ch_distributed_table_pair(
+                connection,
+                options.target_table,
+                ch_cluster=options.ch_cluster,
+                query_label=options.query_label,
+            )
 
-        time_print(f"Creating target shard table {target_shard_table}")
-        _execute_ch_command(connection, shard_sql)
-        time_print(f"Creating target distributed table {target_table}")
-        _execute_ch_command(connection, distributed_sql)
-        time_print(f"Creating local distributed table {target_table}")
-        _execute_ch_command(connection, local_distributed_sql)
-        time_print(f"Waiting for target table {target_table}")
-        _wait_for_ch_table(connection, target_table)
-        time_print(f"Inserting query results into {target_table}")
-        connection.command(
-            apply_query_label(_build_insert_select_sql(target_table, query_sql), query_label)
-        )
-        time_print(f"Finished creating ClickHouse table {target_table}")
+            time_print(f"Inferring ClickHouse schema for {options.target_table}")
+            joined_columns = _infer_ch_query_columns(connection, options.query_sql)
+            shard_sql, distributed_sql, local_distributed_sql = (
+                build_ch_create_table_as_sqls(
+                    table_name=options.target_table,
+                    joined_columns=joined_columns,
+                    query=options.query_sql,
+                    ch_partition_by=options.ch_partition_by,
+                    ch_order_by=options.ch_order_by,
+                    ch_engine=options.ch_engine,
+                    ch_cluster=options.ch_cluster,
+                    ch_sharding_key=options.ch_sharding_key,
+                    query_label=options.query_label,
+                )
+            )
+            metadata.statement_count = 7
+
+            time_print(f"Creating target shard table {target_shard_table}")
+            _execute_ch_command(connection, shard_sql)
+            time_print(f"Creating target distributed table {options.target_table}")
+            _execute_ch_command(connection, distributed_sql)
+            time_print(f"Creating local distributed table {options.target_table}")
+            _execute_ch_command(connection, local_distributed_sql)
+            time_print(f"Waiting for target table {options.target_table}")
+            _wait_for_ch_table(connection, options.target_table)
+            time_print(f"Inserting query results into {options.target_table}")
+            connection.command(
+                apply_query_label(
+                    _build_insert_select_sql(options.target_table, options.query_sql),
+                    options.query_label,
+                )
+            )
+            time_print(f"Finished creating ClickHouse table {options.target_table}")
     finally:
         time_print(f"Closing {config.connection_key} connection")
         connection.close()
+    if options.return_metadata:
+        return SqlOperationResult(rows=None, metadata=metadata)
+    return None
 
 
 def build_ch_create_table_as_sqls(

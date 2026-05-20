@@ -29,6 +29,7 @@ from ...ddl.create_sql_table import create_sql_table
 from ...ddl.create_sql_table import quote_identifier
 from ...connection.errors import InvalidSqlInputError, UnsupportedConnectionTypeError
 from ...labels import apply_query_label
+from ...plans import SqlOperationMetadata, SqlPlan
 from analytics_toolkit.general import time_print
 
 
@@ -99,14 +100,41 @@ def clear_target_table(
     connection: Any,
     table_name: str,
     query_label: str | None = None,
-) -> None:
+    dry_run: bool = False,
+    return_sql: bool = False,
+) -> SqlPlan | None:
     time_print(f"Clearing target table {table_name} on {connection_type}")
     backend = resolve_connection_backend(connection_type)
+    if dry_run or return_sql:
+        sqls = build_clear_table_sqls(
+            backend,
+            table_name,
+            query_label=query_label,
+        )
+        plan = SqlPlan(
+            operation="clear_target_table",
+            target_alias=connection_type,
+            target_backend=backend,
+            target_table=table_name,
+            metadata=SqlOperationMetadata(
+                statement_count=len(sqls),
+                query_label=query_label,
+            ),
+        )
+        plan.extend(
+            sqls,
+            alias=connection_type,
+            backend=backend,
+            phase="clear_target",
+            target_table=table_name,
+        )
+        return plan
     get_backend_adapter(backend).clear_table(
         connection,
         table_name,
         query_label=query_label,
     )
+    return None
 
 
 def apply_target_write_mode(
@@ -265,17 +293,56 @@ def analyze_table(
     connection: Any,
     table_name: str,
     query_label: str | None = None,
-) -> None:
+    dry_run: bool = False,
+    return_sql: bool = False,
+) -> SqlPlan | None:
     backend = resolve_connection_backend(connection_type)
     if backend == "ch":
-        return
+        if dry_run or return_sql:
+            return SqlPlan(
+                operation="analyze_table",
+                target_alias=connection_type,
+                target_backend=backend,
+                target_table=table_name,
+                options={"skipped": True, "reason": "ClickHouse analyze is a no-op"},
+                metadata=SqlOperationMetadata(
+                    statement_count=0,
+                    query_label=query_label,
+                ),
+            )
+        return None
 
     time_print(f"Analyzing target table {table_name} on {connection_type}")
+    if dry_run or return_sql:
+        sql = build_analyze_table_sql(
+            backend,
+            table_name,
+            query_label=query_label,
+        )
+        plan = SqlPlan(
+            operation="analyze_table",
+            target_alias=connection_type,
+            target_backend=backend,
+            target_table=table_name,
+            metadata=SqlOperationMetadata(
+                statement_count=1,
+                query_label=query_label,
+            ),
+        )
+        plan.add(
+            sql,
+            alias=connection_type,
+            backend=backend,
+            phase="analyze",
+            target_table=table_name,
+        )
+        return plan
     get_backend_adapter(backend).analyze_table(
         connection,
         table_name,
         query_label=query_label,
     )
+    return None
 
 
 def gp_vacuum(
@@ -358,14 +425,42 @@ def drop_table(
     table_name: str,
     ch_cluster: str | None = None,
     query_label: str | None = None,
-) -> None:
+    dry_run: bool = False,
+    return_sql: bool = False,
+) -> SqlPlan | None:
     backend = resolve_connection_backend(connection_type)
+    if dry_run or return_sql:
+        sql = build_drop_table_sql(
+            backend,
+            table_name,
+            ch_cluster=ch_cluster,
+            query_label=query_label,
+        )
+        plan = SqlPlan(
+            operation="drop_table",
+            target_alias=connection_type,
+            target_backend=backend,
+            target_table=table_name,
+            metadata=SqlOperationMetadata(
+                statement_count=1,
+                query_label=query_label,
+            ),
+        )
+        plan.add(
+            sql,
+            alias=connection_type,
+            backend=backend,
+            phase="drop_target",
+            target_table=table_name,
+        )
+        return plan
     get_backend_adapter(backend).drop_table(
         connection,
         table_name,
         ch_cluster=ch_cluster,
         query_label=query_label,
     )
+    return None
 
 
 def drop_ch_distributed_table_pair(
