@@ -286,6 +286,42 @@ def test_execute_sql_logs_elapsed_for_each_statement_by_default(
     assert "Finished SQL statement:\nselect 1; select 2" in output
 
 
+def test_execute_sql_progress_false_suppresses_statement_bar(
+    monkeypatch,
+    capsys,
+) -> None:
+    progress_bars: list[object] = []
+
+    class FakeTqdm:
+        def __init__(self, values, **kwargs) -> None:
+            progress_bars.append((list(values), kwargs))
+            self.values = values
+
+        def __iter__(self):
+            return iter(self.values)
+
+    client = FakeClickHouseClient()
+    monkeypatch.setattr(execute_sql_module, "tqdm", FakeTqdm)
+    monkeypatch.setattr(
+        execute_sql_module,
+        "get_sql_connection",
+        lambda key: client,
+    )
+
+    execute_sql_module.execute_sql(
+        "ch",
+        "select 1; select 2",
+        retry_cnt=1,
+        timeout_increment=0,
+        progress=False,
+    )
+
+    output = capsys.readouterr().out
+    assert progress_bars == []
+    assert client.commands == ["select 1", "select 2"]
+    assert "Finished SQL statement:\nselect 1; select 2" in output
+
+
 def test_execute_sql_clickhouse_executes_split_statements_in_order(monkeypatch) -> None:
     client = FakeClickHouseClient()
     monkeypatch.setattr(

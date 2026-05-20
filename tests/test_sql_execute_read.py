@@ -211,7 +211,9 @@ def test_execute_read_retries_with_fresh_connection(
         client: FakeClickHouseClient,
         statements: list[str],
         print_queries: bool = True,
+        progress: bool = True,
     ) -> pd.DataFrame:
+        del progress
         attempts.append(client)
         print_flags.append(print_queries)
         if client is first_connection:

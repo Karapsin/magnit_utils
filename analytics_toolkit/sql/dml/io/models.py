@@ -29,6 +29,7 @@ class ExecuteSqlOptions:
     dry_run: bool = False
     return_sql: bool = False
     return_metadata: bool = False
+    progress: bool = True
 
 
 @dataclass(frozen=True)
@@ -43,3 +44,4 @@ class ExecuteReadOptions:
     timeout_increment: int | float = 5
     query_label: str | None = None
     return_metadata: bool = False
+    progress: bool = True

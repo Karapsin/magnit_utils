@@ -197,7 +197,9 @@ def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> No
         conn: FakeConnection,
         query: str,
         print_queries: bool = True,
+        progress: bool = True,
     ) -> None:
+        del progress
         attempts.append(conn.name)
         print_flags.append(print_queries)
         if conn.name == "first":

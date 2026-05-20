@@ -475,7 +475,7 @@ def _validate_progress(progress: bool) -> None:
 
 def _run_sync_task(task_type: str, kwargs: dict[str, Any]) -> Any:
     task_kwargs = dict(kwargs)
-    if task_type in {"load_df", "transfer"}:
+    if task_type in {"execute", "execute_read", "load_df", "transfer"}:
         if "progress" in task_kwargs:
             _validate_progress(task_kwargs["progress"])
         task_kwargs["progress"] = False

@@ -25,13 +25,18 @@ def _execute_trino(
     conn: Any,
     query: str,
     print_queries: bool = False,
+    progress: bool = True,
 ) -> Any:
     cursor = conn.cursor()
     statements = _split_sql_statements(query)
     time_print(f"Executing {len(statements)} statement(s) on trino")
     statement: str | None = None
     try:
-        for statement in _iterate_statements_with_progress(statements, "trino"):
+        for statement in _iterate_statements_with_progress(
+            statements,
+            "trino",
+            progress=progress,
+        ):
             _maybe_print_query(statement, print_queries, split_preview=True)
             run_timed_query(
                 "trino",
@@ -53,6 +58,7 @@ def _execute_gp(
     print_queries: bool = False,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
+    progress: bool = True,
 ) -> Any:
     statement: str | None = None
     try:
@@ -66,7 +72,11 @@ def _execute_gp(
             else:
                 statements = _split_sql_statements(query)
                 time_print(f"Executing {len(statements)} statement(s) on gp")
-                for statement in _iterate_statements_with_progress(statements, "gp"):
+                for statement in _iterate_statements_with_progress(
+                    statements,
+                    "gp",
+                    progress=progress,
+                ):
                     _maybe_print_query(statement, print_queries, split_preview=True)
                     run_timed_query(
                         "gp",
@@ -88,12 +98,17 @@ def _execute_ch(
     client: Any,
     query: str,
     print_queries: bool = False,
+    progress: bool = True,
 ) -> Any:
     statements = _split_sql_statements(query)
     time_print(f"Executing {len(statements)} statement(s) on ch")
     statement: str | None = None
     try:
-        for statement in _iterate_statements_with_progress(statements, "ch"):
+        for statement in _iterate_statements_with_progress(
+            statements,
+            "ch",
+            progress=progress,
+        ):
             _maybe_print_query(statement, print_queries, split_preview=True)
             run_timed_query(
                 "ch",
@@ -118,6 +133,7 @@ def execute_sql(
     dry_run: bool = False,
     return_sql: bool = False,
     return_metadata: bool = False,
+    progress: bool = True,
 ) -> Any:
     options = _build_execute_sql_options(
         connection_type=connection_type,
@@ -131,6 +147,7 @@ def execute_sql(
         dry_run=dry_run,
         return_sql=return_sql,
         return_metadata=return_metadata,
+        progress=progress,
     )
 
     if options.dry_run or options.return_sql:
@@ -160,6 +177,7 @@ def execute_sql(
                 print_queries=options.print_queries,
                 gp_break_query=options.gp_break_query,
                 gp_commit_each_statement=options.gp_commit_each_statement,
+                progress=options.progress,
             )
             metadata.affected_rows = None
             return result
@@ -205,6 +223,7 @@ def _build_execute_sql_options(
     dry_run: bool,
     return_sql: bool,
     return_metadata: bool,
+    progress: bool,
 ) -> ExecuteSqlOptions:
     config = get_connection_config(connection_type)
     connection_key = config.connection_key
@@ -217,6 +236,7 @@ def _build_execute_sql_options(
         raise ValueError("retry_cnt must be at least 1.")
     if timeout_increment < 0:
         raise ValueError("timeout_increment must be non-negative.")
+    _validate_progress(progress)
     sql = apply_query_label(sql, query_label)
     return ExecuteSqlOptions(
         connection_key=connection_key,
@@ -231,6 +251,7 @@ def _build_execute_sql_options(
         dry_run=dry_run,
         return_sql=return_sql,
         return_metadata=return_metadata,
+        progress=progress,
     )
 
 
@@ -283,9 +304,12 @@ def _split_sql_statements(query: str) -> list[str]:
 
 
 def _iterate_statements_with_progress(
-    statements: list[str], connection_type: str
+    statements: list[str],
+    connection_type: str,
+    *,
+    progress: bool = True,
 ) -> Iterator[str]:
-    if len(statements) <= 1:
+    if len(statements) <= 1 or not progress:
         return iter(statements)
 
     return iter(
@@ -307,6 +331,11 @@ def _maybe_print_query(query: str, print_queries: bool, split_preview: bool) -> 
         time_print(f"Executing query:\n{statement_to_print}")
 
 
+def _validate_progress(progress: bool) -> None:
+    if not isinstance(progress, bool):
+        raise ValueError("progress must be a boolean.")
+
+
 _EXECUTE_FUNCTION_NAMES = {
     "trino": "_execute_trino",
     "gp": "_execute_gp",
@@ -322,6 +351,7 @@ def _execute_backend(
     print_queries: bool,
     gp_break_query: bool,
     gp_commit_each_statement: bool,
+    progress: bool,
 ) -> Any:
     function_name = _EXECUTE_FUNCTION_NAMES.get(backend)
     if function_name is None:
@@ -335,9 +365,11 @@ def _execute_backend(
             print_queries=print_queries,
             gp_break_query=gp_break_query,
             gp_commit_each_statement=gp_commit_each_statement,
+            progress=progress,
         )
     return globals()[function_name](
         connection,
         sql,
         print_queries=print_queries,
+        progress=progress,
     )

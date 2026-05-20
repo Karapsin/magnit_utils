@@ -12,8 +12,8 @@ SQL utilities for reading, executing, loading, and transferring data across:
 from analytics_toolkit import sql
 
 sql.read(..., retry_cnt=5, timeout_increment=5)
-sql.execute(..., retry_cnt=5, timeout_increment=5)
-sql.execute_read(..., retry_cnt=5, timeout_increment=5)
+sql.execute(..., retry_cnt=5, timeout_increment=5, progress=True)
+sql.execute_read(..., retry_cnt=5, timeout_increment=5, progress=True)
 sql.async_sql(
     ...,
     concurrency=5,
@@ -73,7 +73,8 @@ ClickHouse and submit each statement sequentially; the next statement is sent
 only after the previous driver call returns. `execute_read` executes every
 statement except the last, then reads the last statement into a pandas dataframe
 on the same connection. Greenplum keeps its historical default of executing the
-setup SQL as one statement set unless `gp_break_query=True` is passed.
+setup SQL as one statement set unless `gp_break_query=True` is passed. Pass
+`progress=False` to silence multi-statement progress bars.
 
 `async_sql` is a synchronous public function: call it directly and it returns a
 result dictionary. It accepts a non-empty sequence of task specs. Each spec
@@ -89,9 +90,9 @@ work can continue until that function exits. Successful task results are
 preserved, except `None` results are reported as `"success"`. With
 `fail_fast=False`, failed tasks are reported under their task names as the error
 text. A `tqdm` progress bar is shown by default; pass `progress=False` to
-disable it. Built-in `load_df` and `transfer` tasks run with their row-level
-progress bars suppressed inside `async_sql`, so the async task bar is the only
-progress bar shown for a batch.
+disable it. Built-in `execute`, `execute_read`, `load_df`, and `transfer` tasks
+run with their inner progress bars suppressed inside `async_sql`, so the async
+task bar is the only progress bar shown for a batch.
 
 SQL query text is not printed by default. Pass `print_queries=True` to
 `read_sql`, `execute_sql`, `execute_read`, or `gp_cancel_all_running_queries`

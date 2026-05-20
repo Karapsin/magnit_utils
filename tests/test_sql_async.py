@@ -122,10 +122,12 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
         "query": "truncate table sandbox.target",
         "gp_break_query": True,
         "gp_commit_each_statement": True,
+        "progress": False,
     }
     assert calls_by_type["execute_read"] == {
         "connection_type": "trino",
         "query": "create table tmp as select 1; select * from tmp",
+        "progress": False,
     }
     load_kwargs = calls_by_type["load_df"]
     assert load_kwargs["df"] is df
@@ -147,11 +149,19 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
     }
 
 
-def test_async_sql_suppresses_builtin_load_and_transfer_progress(
+def test_async_sql_suppresses_builtin_inner_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: dict[str, dict[str, Any]] = {}
     df = pd.DataFrame({"id": [1]})
+
+    def fake_execute_sql(**kwargs: Any) -> None:
+        calls["execute"] = kwargs
+        return None
+
+    def fake_execute_read(**kwargs: Any) -> pd.DataFrame:
+        calls["execute_read"] = kwargs
+        return pd.DataFrame({"id": [1]})
 
     def fake_load_df(**kwargs: Any) -> int:
         calls["load_df"] = kwargs
@@ -161,9 +171,25 @@ def test_async_sql_suppresses_builtin_load_and_transfer_progress(
         calls["transfer"] = kwargs
         return 2
 
+    monkeypatch.setattr(async_module, "execute_sql", fake_execute_sql)
+    monkeypatch.setattr(async_module, "execute_read", fake_execute_read)
     monkeypatch.setattr(async_module, "load_df", fake_load_df)
     monkeypatch.setattr(async_module, "transfer_table", fake_transfer_table)
 
+    execute_spec = {
+        "name": "refresh",
+        "type": "execute",
+        "connection_type": "ch",
+        "query": "select 1; select 2",
+        "progress": True,
+    }
+    execute_read_spec = {
+        "name": "prepare",
+        "type": "execute_read",
+        "connection_type": "ch",
+        "query": "select 1; select 2",
+        "progress": True,
+    }
     load_spec = {
         "name": "load_batch",
         "type": "load_df",
@@ -183,14 +209,21 @@ def test_async_sql_suppresses_builtin_load_and_transfer_progress(
     }
 
     result = async_module.async_sql(
-        [load_spec, transfer_spec],
+        [execute_spec, execute_read_spec, load_spec, transfer_spec],
         concurrency=1,
         progress=False,
     )
 
-    assert result == {"load_batch": 1, "copy_table": 2}
+    assert result["refresh"] == "success"
+    pd.testing.assert_frame_equal(result["prepare"], pd.DataFrame({"id": [1]}))
+    assert result["load_batch"] == 1
+    assert result["copy_table"] == 2
+    assert calls["execute"]["progress"] is False
+    assert calls["execute_read"]["progress"] is False
     assert calls["load_df"]["progress"] is False
     assert calls["transfer"]["progress"] is False
+    assert execute_spec["progress"] is True
+    assert execute_read_spec["progress"] is True
     assert load_spec["progress"] is True
     assert transfer_spec["progress"] is True
 
@@ -273,7 +306,12 @@ def test_async_sql_start_comment_prefixes_sql_fields(
 def test_async_sql_rejects_removed_random_sleep_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_execute_read(*, connection_type: str, query: str) -> pd.DataFrame:
+    def fake_execute_read(
+        *,
+        connection_type: str,
+        query: str,
+        progress: bool = False,
+    ) -> pd.DataFrame:
         return pd.DataFrame({"query": [query], "connection_type": [connection_type]})
 
     monkeypatch.setattr(async_module, "execute_read", fake_execute_read)
@@ -489,10 +527,12 @@ def test_async_sql_uses_generated_names_for_unnamed_task_sequence(
         {
             "connection_type": "gp",
             "query": "insert into target select 1",
+            "progress": False,
         },
         {
             "connection_type": "gp",
             "query": "insert into target select 2",
+            "progress": False,
         },
     ]
 
