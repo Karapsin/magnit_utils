@@ -68,9 +68,12 @@ data loading. Pass `progress=False` to silence those bars. `dry_run=True` and
 progress is indeterminate by default; pass `estimate_total_rows=True` to use a
 best-effort backend planner estimate as the progress total.
 
-`execute_read` accepts the same execution options as `execute_sql`. It splits
-the provided SQL into statements, executes every statement except the last, then
-reads the last statement into a pandas dataframe on the same connection.
+`execute_sql` and `execute_read` split multi-statement SQL for Trino and
+ClickHouse and submit each statement sequentially; the next statement is sent
+only after the previous driver call returns. `execute_read` executes every
+statement except the last, then reads the last statement into a pandas dataframe
+on the same connection. Greenplum keeps its historical default of executing the
+setup SQL as one statement set unless `gp_break_query=True` is passed.
 
 `async_sql` is a synchronous public function: call it directly and it returns a
 result dictionary. It accepts a non-empty sequence of task specs. Each spec

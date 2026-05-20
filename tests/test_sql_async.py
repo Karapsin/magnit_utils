@@ -75,7 +75,6 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
                 "type": "execute_read",
                 "connection_type": "trino",
                 "query": "create table tmp as select 1; select * from tmp",
-                "random_sleep_seconds": None,
             },
             "load_batch": {
                 "type": "load_df",
@@ -127,7 +126,6 @@ def test_async_sql_dispatches_supported_task_types_and_preserves_order(
     assert calls_by_type["execute_read"] == {
         "connection_type": "trino",
         "query": "create table tmp as select 1; select * from tmp",
-        "random_sleep_seconds": None,
     }
     load_kwargs = calls_by_type["load_df"]
     assert load_kwargs["df"] is df
@@ -220,6 +218,29 @@ def test_async_sql_start_comment_prefixes_sql_fields(
         == "/* async batch */\ncreate table tmp as select 1; select * from tmp"
     )
     assert calls["transfer"]["from_sql"] == "/* async batch */\nselect * from source"
+
+
+def test_async_sql_rejects_removed_random_sleep_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_execute_read(*, connection_type: str, query: str) -> pd.DataFrame:
+        return pd.DataFrame({"query": [query], "connection_type": [connection_type]})
+
+    monkeypatch.setattr(async_module, "execute_read", fake_execute_read)
+
+    with pytest.raises(TypeError, match="random_sleep_seconds"):
+        async_module.async_sql(
+            [
+                {
+                    "type": "execute_read",
+                    "connection_type": "trino",
+                    "query": "select 1",
+                    "random_sleep_seconds": None,
+                }
+            ],
+            concurrency=1,
+            progress=False,
+        )
 
 
 def test_async_sql_task_start_comment_overrides_default(

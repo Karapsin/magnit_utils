@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tests.sql_fakes import FakeDbapiConnection
+from tests.sql_fakes import FakeClickHouseClient, FakeDbapiConnection
 
 
 capabilities_module = importlib.import_module("analytics_toolkit.sql.capabilities")
@@ -196,7 +196,6 @@ def test_execute_sql_dry_run_does_not_open_connection(monkeypatch) -> None:
     plan = execute_sql_module.execute_sql(
         "trino",
         "select 1; select 2",
-        random_sleep_seconds=None,
         dry_run=True,
         query_label="dry-exec",
     )
@@ -207,8 +206,62 @@ def test_execute_sql_dry_run_does_not_open_connection(monkeypatch) -> None:
         "execute",
         "execute",
     ]
+    assert "random_sleep_seconds" not in plan.options
     assert plan.metadata.statement_count == 2
     assert sum("query_label=dry-exec" in sql for sql in plan.sqls) == 1
+
+
+def test_execute_sql_trino_executes_split_statements_in_order(monkeypatch) -> None:
+    connection = FakeDbapiConnection()
+    monkeypatch.setattr(
+        execute_sql_module,
+        "get_sql_connection",
+        lambda key: connection,
+    )
+
+    execute_sql_module.execute_sql(
+        "trino",
+        "select 1; select 2; select 3",
+        print_queries=False,
+        retry_cnt=1,
+        timeout_increment=0,
+    )
+
+    assert connection.executed == ["select 1", "select 2", "select 3"]
+    assert connection.close_calls == 1
+
+
+def test_execute_sql_clickhouse_executes_split_statements_in_order(monkeypatch) -> None:
+    client = FakeClickHouseClient()
+    monkeypatch.setattr(
+        execute_sql_module,
+        "get_sql_connection",
+        lambda key: client,
+    )
+
+    execute_sql_module.execute_sql(
+        "ch",
+        "CREATE TABLE tmp (id UInt64); INSERT INTO tmp VALUES (1); DROP TABLE tmp",
+        print_queries=False,
+        retry_cnt=1,
+        timeout_increment=0,
+    )
+
+    assert client.commands == [
+        "CREATE TABLE tmp (id UInt64)",
+        "INSERT INTO tmp VALUES (1)",
+        "DROP TABLE tmp",
+    ]
+    assert client.close_calls == 1
+
+
+def test_execute_sql_rejects_removed_random_sleep_seconds() -> None:
+    with pytest.raises(TypeError, match="random_sleep_seconds"):
+        execute_sql_module.execute_sql(
+            "trino",
+            "select 1",
+            random_sleep_seconds=None,
+        )
 
 
 def test_execute_sql_return_metadata_reports_attempt_and_statement_count(
@@ -224,7 +277,6 @@ def test_execute_sql_return_metadata_reports_attempt_and_statement_count(
     result = execute_sql_module.execute_sql(
         "gp",
         "select 1",
-        random_sleep_seconds=None,
         print_queries=False,
         retry_cnt=1,
         timeout_increment=0,
@@ -252,7 +304,6 @@ def test_execute_read_return_metadata_preserves_dataframe(monkeypatch) -> None:
     result = execute_read_module.execute_read(
         "gp",
         "CREATE TEMP TABLE tmp AS SELECT 1; SELECT id, status FROM tmp",
-        random_sleep_seconds=None,
         print_queries=False,
         gp_break_query=True,
         retry_cnt=1,
@@ -265,6 +316,15 @@ def test_execute_read_return_metadata_preserves_dataframe(monkeypatch) -> None:
     assert result.metadata.read_rows == 1
     assert result.metadata.statement_count == 2
     assert result.metadata.operation_status == "success"
+
+
+def test_execute_read_rejects_removed_random_sleep_seconds() -> None:
+    with pytest.raises(TypeError, match="random_sleep_seconds"):
+        execute_read_module.execute_read(
+            "trino",
+            "select 1",
+            random_sleep_seconds=None,
+        )
 
 
 def test_transfer_dry_run_includes_source_stage_and_target_steps() -> None:

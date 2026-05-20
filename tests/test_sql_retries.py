@@ -188,7 +188,6 @@ def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> No
     def fake_execute_trino(
         conn: FakeConnection,
         query: str,
-        random_sleep_seconds: float | None = 5,
         print_queries: bool = True,
     ) -> None:
         attempts.append(conn.name)
@@ -200,7 +199,6 @@ def test_execute_sql_retries_whole_flow_with_fresh_connection(monkeypatch) -> No
     execute_sql_module.execute_sql(
         "trino",
         "select 1; select 2",
-        random_sleep_seconds=None,
         retry_cnt=2,
         timeout_increment=0,
     )
@@ -252,7 +250,6 @@ def test_execute_sql_gp_failure_preserves_original_exception_and_rolls_back(
         execute_sql_module.execute_sql(
             "gp",
             "select 1",
-            random_sleep_seconds=None,
             retry_cnt=1,
             timeout_increment=0,
         )

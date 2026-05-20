@@ -20,7 +20,6 @@ class ExecuteSqlOptions:
     connection_key: str
     backend: str
     sql: str
-    random_sleep_seconds: float | None = 5
     print_queries: bool = True
     gp_break_query: bool = False
     gp_commit_each_statement: bool = False
@@ -37,7 +36,6 @@ class ExecuteReadOptions:
     connection_key: str
     backend: str
     statements: list[str]
-    random_sleep_seconds: float | None = 5
     print_queries: bool = True
     gp_break_query: bool = False
     gp_commit_each_statement: bool = False
@@ -45,4 +43,3 @@ class ExecuteReadOptions:
     timeout_increment: int | float = 5
     query_label: str | None = None
     return_metadata: bool = False
-

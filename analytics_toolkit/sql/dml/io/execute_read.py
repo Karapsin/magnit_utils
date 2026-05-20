@@ -21,7 +21,6 @@ from .execute_sql import (
     _execute_trino_statement,
     _iterate_statements_with_progress,
     _maybe_print_query,
-    _maybe_sleep_between_queries,
     _split_sql_statements,
 )
 from .models import ExecuteReadOptions
@@ -30,7 +29,6 @@ from .models import ExecuteReadOptions
 def execute_read(
     connection_type: str,
     query: str,
-    random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
@@ -42,7 +40,6 @@ def execute_read(
     options = _build_execute_read_options(
         connection_type=connection_type,
         query=query,
-        random_sleep_seconds=random_sleep_seconds,
         print_queries=print_queries,
         gp_break_query=gp_break_query,
         gp_commit_each_statement=gp_commit_each_statement,
@@ -70,7 +67,6 @@ def execute_read(
                 options.backend,
                 connection_ref["connection"],
                 options.statements,
-                random_sleep_seconds=options.random_sleep_seconds,
                 print_queries=options.print_queries,
                 gp_break_query=options.gp_break_query,
                 gp_commit_each_statement=options.gp_commit_each_statement,
@@ -115,7 +111,6 @@ def _build_execute_read_options(
     *,
     connection_type: str,
     query: str,
-    random_sleep_seconds: float | None,
     print_queries: bool,
     gp_break_query: bool,
     gp_commit_each_statement: bool,
@@ -148,7 +143,6 @@ def _build_execute_read_options(
         connection_key=connection_key,
         backend=backend,
         statements=statements,
-        random_sleep_seconds=random_sleep_seconds,
         print_queries=print_queries,
         gp_break_query=gp_break_query,
         gp_commit_each_statement=gp_commit_each_statement,
@@ -162,7 +156,6 @@ def _build_execute_read_options(
 def _execute_read_trino(
     conn: Any,
     statements: list[str],
-    random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
 ) -> pd.DataFrame:
     time_print(
@@ -176,7 +169,6 @@ def _execute_read_trino(
             statements[:-1],
             connection_type="trino",
             execute_statement=_execute_trino_statement,
-            random_sleep_seconds=random_sleep_seconds,
             print_queries=print_queries,
         )
         return _read_dbapi_cursor(cursor, statements[-1], "trino", print_queries)
@@ -190,7 +182,6 @@ def _execute_read_trino(
 def _execute_read_gp(
     conn: Any,
     statements: list[str],
-    random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
@@ -208,17 +199,12 @@ def _execute_read_gp(
             _maybe_print_query(setup_sql, print_queries, split_preview=False)
             cursor.execute(setup_sql)
         else:
-            total = len(statements)
-            for index, statement in enumerate(
-                _iterate_statements_with_progress(setup_statements, "gp"),
-                start=1,
-            ):
+            for statement in _iterate_statements_with_progress(setup_statements, "gp"):
                 _maybe_print_query(statement, print_queries, split_preview=True)
                 cursor.execute(statement)
                 if gp_commit_each_statement:
                     conn.commit()
                     should_commit_at_end = False
-                _maybe_sleep_between_queries(index, total, random_sleep_seconds)
 
         result = _read_dbapi_cursor(cursor, statements[-1], "gp", print_queries)
         if should_commit_at_end:
@@ -234,7 +220,6 @@ def _execute_read_gp(
 def _execute_read_ch(
     client: Any,
     statements: list[str],
-    random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
 ) -> pd.DataFrame:
     time_print(
@@ -247,7 +232,6 @@ def _execute_read_ch(
             statements[:-1],
             connection_type="ch",
             execute_statement=_execute_ch_statement,
-            random_sleep_seconds=random_sleep_seconds,
             print_queries=print_queries,
         )
         _maybe_print_query(statements[-1], print_queries, split_preview=True)
@@ -263,17 +247,11 @@ def _execute_setup_statements(
     *,
     connection_type: str,
     execute_statement: Any,
-    random_sleep_seconds: float | None,
     print_queries: bool,
 ) -> None:
-    total = len(statements) + 1
-    for index, statement in enumerate(
-        _iterate_statements_with_progress(statements, connection_type),
-        start=1,
-    ):
+    for statement in _iterate_statements_with_progress(statements, connection_type):
         _maybe_print_query(statement, print_queries, split_preview=True)
         execute_statement(executor, statement)
-        _maybe_sleep_between_queries(index, total, random_sleep_seconds)
 
 
 def _read_dbapi_cursor(
@@ -302,7 +280,6 @@ def _execute_read_backend(
     connection: Any,
     statements: list[str],
     *,
-    random_sleep_seconds: float | None,
     print_queries: bool,
     gp_break_query: bool,
     gp_commit_each_statement: bool,
@@ -316,7 +293,6 @@ def _execute_read_backend(
         return globals()[function_name](
             connection,
             statements,
-            random_sleep_seconds=random_sleep_seconds,
             print_queries=print_queries,
             gp_break_query=gp_break_query,
             gp_commit_each_statement=gp_commit_each_statement,
@@ -324,6 +300,5 @@ def _execute_read_backend(
     return globals()[function_name](
         connection,
         statements,
-        random_sleep_seconds=random_sleep_seconds,
         print_queries=print_queries,
     )

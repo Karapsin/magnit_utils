@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import random
-import time
 from typing import Any, Iterator
 
 import sqlparse
@@ -25,7 +23,6 @@ from .models import ExecuteSqlOptions
 def _execute_trino(
     conn: Any,
     query: str,
-    random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
 ) -> Any:
     cursor = conn.cursor()
@@ -33,14 +30,9 @@ def _execute_trino(
     time_print(f"Executing {len(statements)} statement(s) on trino")
     statement: str | None = None
     try:
-        total = len(statements)
-        for index, statement in enumerate(
-            _iterate_statements_with_progress(statements, "trino"),
-            start=1,
-        ):
+        for statement in _iterate_statements_with_progress(statements, "trino"):
             _maybe_print_query(statement, print_queries, split_preview=True)
             _execute_trino_statement(cursor, statement)
-            _maybe_sleep_between_queries(index, total, random_sleep_seconds)
     except Exception:
         failed_query = statement if statement is not None else query
         time_print(f"SQL failed on trino:\n{failed_query}")
@@ -51,7 +43,6 @@ def _execute_trino(
 def _execute_gp(
     conn: Any,
     query: str,
-    random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
@@ -68,17 +59,12 @@ def _execute_gp(
             else:
                 statements = _split_sql_statements(query)
                 time_print(f"Executing {len(statements)} statement(s) on gp")
-                total = len(statements)
-                for index, statement in enumerate(
-                    _iterate_statements_with_progress(statements, "gp"),
-                    start=1,
-                ):
+                for statement in _iterate_statements_with_progress(statements, "gp"):
                     _maybe_print_query(statement, print_queries, split_preview=True)
                     cursor.execute(statement)
                     if gp_commit_each_statement:
                         conn.commit()
                         should_commit_at_end = False
-                    _maybe_sleep_between_queries(index, total, random_sleep_seconds)
             if should_commit_at_end:
                 conn.commit()
             return None
@@ -91,21 +77,15 @@ def _execute_gp(
 def _execute_ch(
     client: Any,
     query: str,
-    random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
 ) -> Any:
     statements = _split_sql_statements(query)
     time_print(f"Executing {len(statements)} statement(s) on ch")
     statement: str | None = None
     try:
-        total = len(statements)
-        for index, statement in enumerate(
-            _iterate_statements_with_progress(statements, "ch"),
-            start=1,
-        ):
+        for statement in _iterate_statements_with_progress(statements, "ch"):
             _maybe_print_query(statement, print_queries, split_preview=True)
             _execute_ch_statement(client, statement)
-            _maybe_sleep_between_queries(index, total, random_sleep_seconds)
     except Exception:
         failed_query = statement if statement is not None else query
         time_print(f"SQL failed on ch:\n{failed_query}")
@@ -116,7 +96,6 @@ def _execute_ch(
 def execute_sql(
     connection_type: str,
     query: str,
-    random_sleep_seconds: float | None = 5,
     print_queries: bool = True,
     gp_break_query: bool = False,
     gp_commit_each_statement: bool = False,
@@ -130,7 +109,6 @@ def execute_sql(
     options = _build_execute_sql_options(
         connection_type=connection_type,
         query=query,
-        random_sleep_seconds=random_sleep_seconds,
         print_queries=print_queries,
         gp_break_query=gp_break_query,
         gp_commit_each_statement=gp_commit_each_statement,
@@ -165,7 +143,6 @@ def execute_sql(
                 options.backend,
                 connection_ref["connection"],
                 options.sql,
-                random_sleep_seconds=options.random_sleep_seconds,
                 print_queries=options.print_queries,
                 gp_break_query=options.gp_break_query,
                 gp_commit_each_statement=options.gp_commit_each_statement,
@@ -205,7 +182,6 @@ def _build_execute_sql_options(
     *,
     connection_type: str,
     query: str,
-    random_sleep_seconds: float | None,
     print_queries: bool,
     gp_break_query: bool,
     gp_commit_each_statement: bool,
@@ -232,7 +208,6 @@ def _build_execute_sql_options(
         connection_key=connection_key,
         backend=backend,
         sql=sql,
-        random_sleep_seconds=random_sleep_seconds,
         print_queries=print_queries,
         gp_break_query=gp_break_query,
         gp_commit_each_statement=gp_commit_each_statement,
@@ -252,7 +227,6 @@ def build_execute_sql_plan(options: ExecuteSqlOptions) -> SqlPlan:
         target_alias=options.connection_key,
         target_backend=options.backend,
         options={
-            "random_sleep_seconds": options.random_sleep_seconds,
             "print_queries": options.print_queries,
             "gp_break_query": options.gp_break_query,
             "gp_commit_each_statement": options.gp_commit_each_statement,
@@ -319,19 +293,6 @@ def _maybe_print_query(query: str, print_queries: bool, split_preview: bool) -> 
         time_print(f"Executing query:\n{statement_to_print}")
 
 
-def _maybe_sleep_between_queries(
-    current: int, total: int, random_sleep_seconds: float | None
-) -> None:
-    if total <= 1 or current >= total or random_sleep_seconds is None:
-        return
-    if random_sleep_seconds <= 0:
-        return
-
-    sleep_seconds = random.expovariate(1 / random_sleep_seconds)
-    time_print(f"Sleeping for {sleep_seconds:.2f}s before next query")
-    time.sleep(sleep_seconds)
-
-
 _EXECUTE_FUNCTION_NAMES = {
     "trino": "_execute_trino",
     "gp": "_execute_gp",
@@ -344,7 +305,6 @@ def _execute_backend(
     connection: Any,
     sql: str,
     *,
-    random_sleep_seconds: float | None,
     print_queries: bool,
     gp_break_query: bool,
     gp_commit_each_statement: bool,
@@ -358,7 +318,6 @@ def _execute_backend(
         return globals()[function_name](
             connection,
             sql,
-            random_sleep_seconds=random_sleep_seconds,
             print_queries=print_queries,
             gp_break_query=gp_break_query,
             gp_commit_each_statement=gp_commit_each_statement,
@@ -366,6 +325,5 @@ def _execute_backend(
     return globals()[function_name](
         connection,
         sql,
-        random_sleep_seconds=random_sleep_seconds,
         print_queries=print_queries,
     )

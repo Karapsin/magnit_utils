@@ -97,7 +97,6 @@ def test_execute_read_clickhouse_executes_setup_and_reads_last(
         CREATE TEMPORARY TABLE tmp AS SELECT 1 AS value;
         SELECT value FROM tmp
         """,
-        random_sleep_seconds=None,
         print_queries=False,
     )
 
@@ -124,7 +123,6 @@ def test_execute_read_gp_executes_setup_statement_set_and_reads_last(
         INSERT INTO tmp SELECT 2, 'still ok';
         SELECT id, label FROM tmp
         """,
-        random_sleep_seconds=None,
         print_queries=False,
     )
 
@@ -157,7 +155,6 @@ def test_execute_read_gp_break_query_executes_setup_statements_separately(
         "CREATE TEMP TABLE tmp AS SELECT 1; "
         "INSERT INTO tmp SELECT 2; "
         "SELECT * FROM tmp",
-        random_sleep_seconds=None,
         print_queries=False,
         gp_break_query=True,
         gp_commit_each_statement=True,
@@ -188,7 +185,6 @@ def test_execute_read_retries_with_fresh_connection(
     def fake_execute_read_ch(
         client: FakeClickHouseClient,
         statements: list[str],
-        random_sleep_seconds: float | None = 5,
         print_queries: bool = True,
     ) -> pd.DataFrame:
         attempts.append(client)
